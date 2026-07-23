@@ -1,0 +1,16 @@
+{
+  "name": "JPEGDEC",
+  "version": "1.2.7",
+  "description": "bitbank2 JPEGDEC, vendored from x4-os .pio/libdeps (pin 8628297) with CrossPoint's progressive-MCU-skip patches (x4-os scripts/jpegdec_patches) already applied. Trimmed to the decoder core: no examples, no JPEGDisplay wrapper, no S3 SIMD .S files (ESP32-C3 is RISC-V; the S3 path is gated on dsps_fft2r and never compiles here).",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/bitbank2/JPEGDEC"
+  },
+  "license": "Apache-2.0",
+  "frameworks": "*",
+  "platforms": "*",
+  "build": {
+    "srcDir": "src",
+    "includeDir": "src"
+  }
+}

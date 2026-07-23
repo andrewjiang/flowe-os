@@ -1,0 +1,117 @@
+name: Firmware Release
+
+on:
+  push:
+    tags:
+      - "fw-v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Firmware version (for example, 1.2.3)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            xphone-os/.pio/build
+          key: ${{ runner.os }}-platformio-${{ hashFiles('xphone-os/platformio.ini') }}
+
+      - name: Install PlatformIO
+        run: python -m pip install platformio
+
+      - name: Resolve release version
+        env:
+          DISPATCH_VERSION: ${{ inputs.version }}
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            VERSION="${GITHUB_REF_NAME#fw-v}"
+            RELEASE_TAG="${GITHUB_REF_NAME}"
+          else
+            VERSION="${DISPATCH_VERSION}"
+            RELEASE_TAG="fw-v${VERSION}"
+          fi
+
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+          echo "RELEASE_TAG=${RELEASE_TAG}" >> "$GITHUB_ENV"
+
+      - name: Build firmware
+        run: cd xphone-os && pio run -e x3 -e x4
+
+      - name: Stage release assets
+        run: |
+          mkdir -p dist
+          cp xphone-os/.pio/build/x3/firmware.bin dist/flowe-x3.bin
+          cp xphone-os/.pio/build/x4/firmware.bin dist/flowe-x4.bin
+          cp dist/flowe-x3.bin "dist/flowe-x3-${VERSION}.bin"
+          cp dist/flowe-x4.bin "dist/flowe-x4-${VERSION}.bin"
+
+          (
+            cd dist
+            sha256sum \
+              flowe-x3.bin \
+              flowe-x4.bin \
+              "flowe-x3-${VERSION}.bin" \
+              "flowe-x4-${VERSION}.bin" \
+              > SHA256SUMS.txt
+          )
+
+          RELEASE_DATE="$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
+            python - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          dist = Path("dist")
+
+          def sha256(path: Path) -> str:
+              return hashlib.sha256(path.read_bytes()).hexdigest()
+
+          manifest = {
+              "version": os.environ["VERSION"],
+              "date": os.environ["RELEASE_DATE"],
+              "assets": {
+                  "x3": {
+                      "file": "flowe-x3.bin",
+                      "sha256": sha256(dist / "flowe-x3.bin"),
+                  },
+                  "x4": {
+                      "file": "flowe-x4.bin",
+                      "sha256": sha256(dist / "flowe-x4.bin"),
+                  },
+              },
+          }
+
+          (dist / "latest.json").write_text(
+              json.dumps(manifest, separators=(",", ":")) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: Firmware ${{ env.VERSION }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: dist/*

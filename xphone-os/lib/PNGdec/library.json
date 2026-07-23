@@ -1,0 +1,16 @@
+{
+  "name": "PNGdec",
+  "version": "1.1.6",
+  "description": "bitbank2 PNGdec, vendored from x4-os .pio/libdeps (registry pin 1.1.6). Trimmed to the decoder core + its embedded zlib inflate: no examples, no PNGDisplay wrapper, no infback.c, no S3 SIMD .S file. PNG_MAX_BUFFERED_PIXELS is raised via platformio.ini build_flags (same value as x4-os) so wide cover images fit the two internal scanline buffers.",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/bitbank2/PNGdec"
+  },
+  "license": "Apache-2.0",
+  "frameworks": "*",
+  "platforms": "*",
+  "build": {
+    "srcDir": "src",
+    "includeDir": "src"
+  }
+}
