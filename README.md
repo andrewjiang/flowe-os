@@ -5,7 +5,7 @@ e-ink device. Paired with the Flowe iOS app, it puts your priorities, agenda,
 and notifications on calm paper-like glass — and starts focus blocks that
 shield the apps you choose on your iPhone.
 
-Part of [Flowe](https://flowe-ink.vercel.app). Firmware is MIT-licensed;
+Part of [Flowe](https://www.flowe.ink). Firmware is MIT-licensed;
 vendored libraries keep their own licenses.
 
 **Requires:** an Xteink X3 (hardware-tested; the X4 target compiles but is
@@ -63,7 +63,7 @@ link then carries everything:
 
 The iOS app does the phone-side work — speech-to-priorities (parsed
 on-device with Apple's models), calendar, Screen Time shields — and ships
-via the Flowe beta at [flowe-ink.vercel.app](https://flowe-ink.vercel.app).
+via the Flowe beta at [www.flowe.ink](https://www.flowe.ink).
 The reader works with no app.
 
 ## Performance
@@ -86,7 +86,7 @@ and 2.5 MB of its 6.5 MB app partition.
 
 Grab `flowe-x3.bin` from [Releases](https://github.com/andrewjiang/flowe-os/releases),
 or follow the step-by-step guide at
-[flowe-ink.vercel.app/flash](https://flowe-ink.vercel.app/flash).
+[www.flowe.ink/flash](https://www.flowe.ink/flash).
 
 **SD card** (no data cable needed): copy the
 release to the SD root as `update.bin`, insert, hold **Left + Power**. The
