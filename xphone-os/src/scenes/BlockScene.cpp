@@ -516,7 +516,6 @@ void BlockScene::renderActive(Gfx& gfx, const CompanionCardState& card) {
   const bool onBreak = freshCard ? isBreakCard(card) : seeded.onBreak;
 
   gfx.drawTextCentered(kFontBold, cx, kTitleY, title);
-  drawLock(gfx, cx, kHeroTopY, true);
 
   // Countdown panel (CrossPoint renderActive: bordered panel, remaining
   // number + label, progress bar underneath).
@@ -524,6 +523,11 @@ void BlockScene::renderActive(Gfx& gfx, const CompanionCardState& card) {
   const int panelX = kMarginX + 30;
   const int panelH = 122;
   const int panelY = h - Scene::SOFTKEY_BAR_H - 68 - panelH - 46;
+
+  // WORK-sign hero centered between the title and the countdown panel.
+  const int heroTop = kTitleY + 56;
+  drawArtwork(gfx, BlockHeroWork, (w - BlockWorkWidth) / 2,
+              heroTop + (panelY - heroTop - BlockWorkHeight) / 2, BlockWorkWidth, BlockWorkHeight);
   gfx.drawRoundedRect(panelX, panelY, panelW, panelH, 18, 3, true);
 
   if (haveLive) {
