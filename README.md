@@ -84,12 +84,13 @@ and 2.5 MB of its 6.5 MB app partition.
 
 ## Install
 
-Grab `flowe-x3.bin` from [Releases](https://github.com/andrewjiang/flowe-os/releases),
+Grab `update.bin` from [Releases](https://github.com/andrewjiang/flowe-os/releases) —
+it's the X3 image, pre-named for the SD updater —
 or follow the step-by-step guide at
 [www.flowe.ink/flash](https://www.flowe.ink/flash).
 
-**SD card** (no data cable needed): copy the
-release to the SD root as `update.bin`, insert, hold **Left + Power**. The
+**SD card** (no data cable needed): copy `update.bin` to the SD root,
+insert, hold **Left + Power**. The
 updater checks the image's header, segments, checksum, and SHA-256 trailer
 before writing the inactive OTA slot, and switches the boot slot only after
 every write succeeds.

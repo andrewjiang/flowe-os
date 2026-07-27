@@ -63,10 +63,13 @@ jobs:
           cp xphone-os/.pio/build/x4/firmware.bin dist/flowe-x4.bin
           cp dist/flowe-x3.bin "dist/flowe-x3-${VERSION}.bin"
           cp dist/flowe-x4.bin "dist/flowe-x4-${VERSION}.bin"
+          # Pre-named for the SD updater so users skip the rename step.
+          cp dist/flowe-x3.bin dist/update.bin
 
           (
             cd dist
             sha256sum \
+              update.bin \
               flowe-x3.bin \
               flowe-x4.bin \
               "flowe-x3-${VERSION}.bin" \
