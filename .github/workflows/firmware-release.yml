@@ -66,9 +66,26 @@ jobs:
           # Pre-named for the SD updater so users skip the rename step.
           cp dist/flowe-x3.bin dist/update.bin
 
+          # Zip wrapper: a re-downloaded zip gets browser-renamed, but the
+          # update.bin inside keeps its exact name.
+          mkdir -p ziproot/flowe-x3
+          cp dist/flowe-x3.bin ziproot/flowe-x3/update.bin
+          printf '%s\n' \
+            'Flowe OS - X3 firmware' \
+            '' \
+            '1. Copy update.bin to the root of the microSD card.' \
+            '2. Put the card back in the X3.' \
+            '3. Hold the left side button and power together until the' \
+            '   update screen appears.' \
+            '' \
+            'Guide: https://www.flowe.ink/flash' \
+            > ziproot/flowe-x3/README.txt
+          (cd ziproot && zip -qr ../dist/flowe-x3.zip flowe-x3)
+
           (
             cd dist
             sha256sum \
+              flowe-x3.zip \
               update.bin \
               flowe-x3.bin \
               flowe-x4.bin \
