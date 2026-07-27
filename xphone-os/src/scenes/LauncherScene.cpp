@@ -15,10 +15,12 @@
 
 namespace {
 
-// Six focus apps in a 3×2 grid. Settings opens from BACK; About is in Settings.
-// Icon bitmaps come from IconStyle (Settings → Icon style packs).
+// Six focus apps in a 3×2 grid, ordered by likelihood of use (Today first —
+// it is also the boot selection). Settings opens from BACK; About is in
+// Settings. Icon bitmaps come from IconStyle (Settings → Icon style packs);
+// the XPhoneIconPacks columns in LauncherIcons.h share this order.
 constexpr const char* kApps[LauncherScene::APP_COUNT] = {
-    "Notifications", "Read", "Today", "Priorities", "Block", "Workout",
+    "Today", "Notifications", "Priorities", "Block", "Read", "Workout",
 };
 
 // 1bpp blitter for the ported artwork (format per LauncherIcons.h header;
@@ -68,7 +70,7 @@ BatteryMonitor& battery() {
 
 void LauncherScene::moveSelection(const int dCol, const int dRow) {
   int sel = _sel;
-  // Front Left/Right = linear PREV/NEXT with wrap (Workout↔Notifications).
+  // Front Left/Right = linear PREV/NEXT with wrap (Workout↔Today).
   // Up/Down move by row and still clamp (no wrap) so a short last row feels
   // predictable.
   if (dCol != 0) {

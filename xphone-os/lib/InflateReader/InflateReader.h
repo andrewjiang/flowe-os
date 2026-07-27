@@ -40,17 +40,31 @@ class InflateReader {
  public:
   static constexpr size_t kDictSize = 32768;
 
-  // Shared boot-time dictionary. On the X3, BLE leaves ~40 KB of fragmented
-  // heap and the per-use malloc of the 32 KB streaming window fails, which
-  // broke every first-open chapter index. main() allocates one dict before
-  // the BLE stack starts (contiguous 106 KB available then) and parks it
-  // here; init(true) borrows it when malloc fails. Single main-loop thread,
-  // so a plain in-use flag suffices; nested readers fall back to malloc.
+  // Shared dictionary, parked by whoever owns the radio-free window.
+  //
+  // The 32 KB streaming window must be CONTIGUOUS. A per-use malloc for it
+  // runs late — after cover decoding and section allocations have chopped up
+  // the heap — and on the X3 it routinely fails there, which is what broke
+  // chapter indexing on books with large chapters (ZipFile's one-shot
+  // fallback allocates the whole inflated file instead, so it rescues small
+  // container.xml/content.opf reads but never a chapter).
+  //
+  // It is NOT parked at boot: measured on X3, reserving it before BLE
+  // starts left ~3.5 KB free and starved the BLE stack itself (see
+  // main.cpp "do NOT reserve reader buffers here"). Instead ReaderScene
+  // reserves it in onEnter() immediately after suspending BLE — the moment
+  // contiguous heap peaks — and releases it in onExit() before the radio
+  // comes back. init(true) borrows it whenever a fresh malloc fails.
+  //
+  // Single main-loop thread, so a plain in-use flag suffices; nested readers
+  // fall back to malloc.
   static void setSharedDict(uint8_t* dict);
-  // Free the shared dict back to the heap (File Transfer needs the RAM;
-  // the reader can't run during a transfer and the session ends in a
-  // reboot, which re-allocates it).
+  // Free the shared dict back to the heap. Callers: ReaderScene::onExit
+  // (radio takes its turn again) and File Transfer, which needs the RAM and
+  // ends its session in a reboot.
   static void releaseSharedDict();
+  // True while a dict is parked — lets the owner avoid double-allocating.
+  static bool hasSharedDict();
 
   InflateReader() = default;
   ~InflateReader();

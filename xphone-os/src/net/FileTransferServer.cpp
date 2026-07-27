@@ -244,7 +244,11 @@ void FileTransferServer::handleDelete() {
   if (!queryPath(path, sizeof(path), /*required=*/true)) return;
 
   if (!SdMan.exists(path)) {
-    _server->send(404, "text/plain", "Not found");
+    // Echo the decoded path so the phone's error message shows exactly what
+    // this server looked for — a 404 here is always a path/name mismatch.
+    char msg[224];
+    snprintf(msg, sizeof(msg), "Not found: %s", path);
+    _server->send(404, "text/plain", msg);
     return;
   }
   if (SdMan.remove(path)) {

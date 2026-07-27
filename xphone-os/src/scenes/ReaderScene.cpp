@@ -42,8 +42,10 @@
 // transactions, which serialize on arduino-esp32's bus lock.
 
 #include <Arduino.h>
+#include <InflateReader.h>
 #include <Preferences.h>
 #include <SDCardManager.h>
+#include <esp_heap_caps.h>
 
 #include <cstdio>
 #include <cstring>
@@ -158,6 +160,26 @@ void ReaderScene::onEnter() {
   // reading; onExit resumes it and the phone reconnects automatically.
   COMPANION_BLE.suspendForReader();
 
+  // Claim the 32 KB inflate window NOW, while the heap is at its cleanest.
+  // Suspending BLE hands back tens of KB, but nothing defragments it later:
+  // by the time a chapter is indexed, cover decoding and section buffers have
+  // chopped the heap up and a fresh contiguous 32 KB malloc can fail. When it
+  // does, ZipFile's one-shot fallback tries to inflate the WHOLE entry into
+  // one buffer, which is fine for container.xml but hopeless for a big
+  // chapter — that was "Couldn't index this chapter" on exactly the books
+  // with the largest chapters. Reserving once here makes it deterministic.
+  // Released in onExit() before the radio comes back (main.cpp explains why
+  // this must NOT be parked at boot instead).
+  if (!InflateReader::hasSharedDict()) {
+    auto* dict = static_cast<uint8_t*>(malloc(InflateReader::kDictSize));
+    if (dict) {
+      InflateReader::setSharedDict(dict);
+    }
+    Serial.printf("[xphone-os] reader: inflate window reserve %s (free=%u largest=%u)\n",
+                  dict ? "ok" : "FAILED", ESP.getFreeHeap(),
+                  static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
+  }
+
   _work = Work::None;
   _workArmed = false;
   _pageLoadRetries = 0;
@@ -207,6 +229,7 @@ void ReaderScene::onExit() {
   _measure.reset();
   _renderer.releaseCaches();
   reader::CoverThumb::releaseScratch();  // don't hold the ~58KB decoder block for other scenes
+  InflateReader::releaseSharedDict();    // 32 KB back to the heap before the radio needs it
   _work = Work::None;
   _workArmed = false;
 
@@ -260,7 +283,11 @@ void ReaderScene::runWork() {
 }
 
 void ReaderScene::failWith(const char* msg) {
-  Serial.printf("[xphone-os] reader: %s\n", msg);
+  // Largest CONTIGUOUS block, not just total free: every reader OOM here is a
+  // single big allocation (32 KB inflate window, whole-entry one-shot buffer),
+  // so total-free alone reads "plenty of heap" while the failure is real.
+  Serial.printf("[xphone-os] reader: %s (free=%u largest=%u)\n", msg, ESP.getFreeHeap(),
+                static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
   _errorMsg = msg;
   _state = State::Error;
   _work = Work::None;

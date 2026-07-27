@@ -21,6 +21,7 @@
 #include <SDCardManager.h>
 
 #include "../BlockStatusStore.h"
+#include "../ClockStore.h"
 #include "../NotificationFilter.h"
 #include "../PrioritiesStore.h"
 #include "../WorkoutStore.h"
@@ -506,6 +507,7 @@ void CompanionBleService::markConnected(bool value) {
   ensureMutex();
   xSemaphoreTake(stateMutex, portMAX_DELAY);
   connected = value;
+  if (value && CLOCK_STORE.firstConnectMs == 0) CLOCK_STORE.firstConnectMs = millis();
   statusMessage = connected ? "iPhone connected" : "iPhone disconnected";
   ++revision;
   const bool shouldAdvertise = advertisingWanted && !connected;
@@ -780,6 +782,19 @@ bool CompanionBleService::applyCardPayload(const std::string& payload) {
   }
   if (std::strcmp(type, "notif.apps.request") == 0) {
     sendNotifApps();
+    return true;
+  }
+  if (std::strcmp(type, "time.sync") == 0) {
+    // Phase 0 morning-meditation spec: the phone is the clock. Stamp only the
+    // FIRST arrival after boot — the wake→date latency is the number under test.
+    CLOCK_STORE.day = doc["day"] | 0;
+    CLOCK_STORE.minutesIntoDay = doc["minutesIntoDay"] | 0;
+    if (CLOCK_STORE.firstSyncMs == 0) CLOCK_STORE.firstSyncMs = millis();
+    LOG_INF("X4CMP", "time.sync day=%lu min=%u connect=%lums sync=%lums",
+            static_cast<unsigned long>(CLOCK_STORE.day),
+            static_cast<unsigned>(CLOCK_STORE.minutesIntoDay),
+            static_cast<unsigned long>(CLOCK_STORE.firstConnectMs),
+            static_cast<unsigned long>(CLOCK_STORE.firstSyncMs));
     return true;
   }
   if (std::strcmp(type, "transfer.start") == 0) {

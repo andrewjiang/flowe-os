@@ -1,5 +1,9 @@
 #include "InflateReader.h"
 
+#include <Arduino.h>
+#include <Logging.h>
+#include <esp_heap_caps.h>
+
 #include <cstring>
 #include <type_traits>
 
@@ -22,6 +26,8 @@ void InflateReader::releaseSharedDict() {
   }
 }
 
+bool InflateReader::hasSharedDict() { return gSharedDict != nullptr; }
+
 // Guarantee the cast pattern in the header comment is valid.
 static_assert(std::is_standard_layout<InflateReader>::value,
               "InflateReader must be standard-layout for the uzlib callback cast to work");
@@ -34,13 +40,22 @@ bool InflateReader::init(const bool streaming) {
   if (streaming) {
     ringBuffer = static_cast<uint8_t*>(malloc(INFLATE_DICT_SIZE));
     if (!ringBuffer && gSharedDict && !gSharedDictInUse) {
-      // Heap too fragmented for a fresh 32 KB block (X3 with BLE up):
-      // borrow the boot-time dictionary instead.
+      // Heap too fragmented for a fresh 32 KB block: borrow the reserved
+      // dictionary. Logged because reaching here means the pre-fix build
+      // would have failed this inflate outright.
+      LOG_INF("ZIP", "Fresh 32 KB window unavailable (largest block %u) - borrowing reserved dict",
+              static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
       gSharedDictInUse = true;
       usingSharedDict = true;
       ringBuffer = gSharedDict;
     }
-    if (!ringBuffer) return false;
+    if (!ringBuffer) {
+      LOG_ERR("ZIP", "No 32 KB inflate window: largest block %u, free %u, reserved dict %s",
+              static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)),
+              static_cast<unsigned>(ESP.getFreeHeap()),
+              gSharedDict ? (gSharedDictInUse ? "in use" : "free") : "none");
+      return false;
+    }
     memset(ringBuffer, 0, INFLATE_DICT_SIZE);
   }
 

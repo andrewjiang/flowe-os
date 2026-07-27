@@ -23,9 +23,11 @@ Branch `codex/x4-ancs-inbox`. Flashes over USB (4-pin data cable) or SD card.
   ("until 10:30 AM", seeded from NVS) then live-syncs.
 * **Priorities** — to-do snapshot from the phone; doubles as the dormant sleep
   screen (fetched pre-sleep even if the app was never opened).
-* **Today** — agenda/reminders card from iOS EventKit (`TodayManager`). Weather
-  fields exist in the protocol but are not produced or drawn yet. Needs
-  on-glass validation after Calendar/Reminders permission.
+* **Today** — agenda/reminders card from iOS EventKit (`TodayManager`), plus a
+  weather band under the header: condition+temp left, high/low right, collapsing
+  to nothing when the card carried no weather. The phone produces those two
+  strings in `WeatherProvider` (WeatherKit, Open-Meteo as the keyless fallback).
+  Needs on-glass validation after Calendar/Reminders permission.
 * **Notifications** — iOS notifications via ANCS (incl. iMessage/SMS, which
   arrive as the Social/Other category — no category filtering). Detail view,
   clear-one/clear-all. Newest 10 entries persist across sleep in NVS; on wake
@@ -74,8 +76,8 @@ the current scene.
 ### Known TODOs / open notes
 * **Today on-glass validation** — iOS EventKit producer shipped (`TodayManager`);
   confirm Calendar/Reminders grant → sync → day buckets/overdue on device, plus
-  wake with the NVS-cached Today card. Weather is a separate Phase-2 (protocol
-  fields only; neither side draws them).
+  wake with the NVS-cached Today card, and the weather band (needs a real
+  WeatherKit/Open-Meteo fetch on the phone, not just a synced snapshot).
 * **Launcher icons** — Block/Today/Notifications sources are still 96px, scaled
   by `tools/xphone-icons/build_launcher_icons.py` to 104px (not 120 — comments
   elsewhere are stale). Re-source those three at ≥208px, keep Priorities weight
@@ -195,6 +197,12 @@ pio run -e x3 -t upload    # flash X3
 pio run -e x4 -t upload    # flash X4
 pio device monitor         # 115200 baud, boot report
 ```
+
+### Releases
+
+Tag `main` with `fw-vX.Y.Z` to have CI build and publish `flowe-x3.bin` and
+`flowe-x4.bin` with checksums. Users can download the firmware from the GitHub
+releases page and copy the appropriate binary to an SD card as `update.bin`.
 
 ## Measured size (M1)
 

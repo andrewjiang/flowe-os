@@ -19,7 +19,6 @@
 #include <Arduino.h>
 #include <BoardConfig.h>
 #include <EInkDisplay.h>
-#include <InflateReader.h>
 #include <SPI.h>
 
 #include <freertos/FreeRTOS.h>
@@ -241,6 +240,8 @@ static void boot() {
   // connect/disconnect). Radio and reader take turns instead — the Reader
   // scene suspends BLE on entry and resumes it on exit (CrossPoint's model:
   // it also never runs its reader and companion BLE at the same time).
+  // The inflate dict IS reserved, just later: ReaderScene::onEnter parks it
+  // right after the BLE suspend, when contiguous heap peaks.
   COMPANION_BLE.begin();
   COMPANION_ANCS.begin();
   COMPANION_ANCS.requestPairing();

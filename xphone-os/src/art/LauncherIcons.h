@@ -2269,13 +2269,14 @@ static const uint8_t XPhoneIcon_signal_Workout[] = {
 };
 
 
-// [pack][app] -> bitmap
+// [pack][app] -> bitmap. App columns follow the launcher's kApps order:
+// Today, Notifications, Priorities, Block, Read, Workout.
 constexpr const uint8_t* const XPhoneIconPacks[XPhoneIconPackCount][XPhoneIconAppCount] = {
-    {XPhoneIcon_current_Notifications, XPhoneIcon_current_Read, XPhoneIcon_current_Today, XPhoneIcon_current_Priorities, XPhoneIcon_current_Block, XPhoneIcon_current_Workout},
-    {XPhoneIcon_stamp_Notifications, XPhoneIcon_stamp_Read, XPhoneIcon_stamp_Today, XPhoneIcon_stamp_Priorities, XPhoneIcon_stamp_Block, XPhoneIcon_stamp_Workout},
-    {XPhoneIcon_cutout_Notifications, XPhoneIcon_cutout_Read, XPhoneIcon_cutout_Today, XPhoneIcon_cutout_Priorities, XPhoneIcon_cutout_Block, XPhoneIcon_cutout_Workout},
-    {XPhoneIcon_etched_Notifications, XPhoneIcon_etched_Read, XPhoneIcon_etched_Today, XPhoneIcon_etched_Priorities, XPhoneIcon_etched_Block, XPhoneIcon_etched_Workout},
-    {XPhoneIcon_signal_Notifications, XPhoneIcon_signal_Read, XPhoneIcon_signal_Today, XPhoneIcon_signal_Priorities, XPhoneIcon_signal_Block, XPhoneIcon_signal_Workout},
+    {XPhoneIcon_current_Today, XPhoneIcon_current_Notifications, XPhoneIcon_current_Priorities, XPhoneIcon_current_Block, XPhoneIcon_current_Read, XPhoneIcon_current_Workout},
+    {XPhoneIcon_stamp_Today, XPhoneIcon_stamp_Notifications, XPhoneIcon_stamp_Priorities, XPhoneIcon_stamp_Block, XPhoneIcon_stamp_Read, XPhoneIcon_stamp_Workout},
+    {XPhoneIcon_cutout_Today, XPhoneIcon_cutout_Notifications, XPhoneIcon_cutout_Priorities, XPhoneIcon_cutout_Block, XPhoneIcon_cutout_Read, XPhoneIcon_cutout_Workout},
+    {XPhoneIcon_etched_Today, XPhoneIcon_etched_Notifications, XPhoneIcon_etched_Priorities, XPhoneIcon_etched_Block, XPhoneIcon_etched_Read, XPhoneIcon_etched_Workout},
+    {XPhoneIcon_signal_Today, XPhoneIcon_signal_Notifications, XPhoneIcon_signal_Priorities, XPhoneIcon_signal_Block, XPhoneIcon_signal_Read, XPhoneIcon_signal_Workout},
 };
 
 // Compatibility aliases -> Current pack

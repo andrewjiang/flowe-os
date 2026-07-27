@@ -27,6 +27,18 @@ constexpr int kIconVAdjust = 4;
 constexpr int kDividerRowH = kHeadTopPad + kHeadLineH;
 constexpr int kSectionRowH = kHeadTopPad + kHeadLineH;
 
+// Weather band, between the header rule and the first row: condition+temp on
+// the left (regular), high/low right-aligned (small, sitting on the same
+// optical line). The phone sends "Sunny 72F" / "H 78 / L 61" (WeatherProvider);
+// both are "" when the card carried no weather, and the band collapses so the
+// agenda keeps the full column on those days.
+constexpr int kWeatherTopPad = 10;
+constexpr int kWeatherLineH = 24;
+constexpr int kWeatherBotPad = 8;
+constexpr int kWeatherBandH = kWeatherTopPad + kWeatherLineH + kWeatherBotPad;
+constexpr int kWeatherGap = 12;    // condition -> high/low
+constexpr int kWeatherHlDrop = 4;  // small font baseline nudge onto regular
+
 // Item: time/due line (small) ABOVE the bold title, with breathing room under.
 constexpr int kTimeLineH = 22;
 constexpr int kTitleLineH = 30;
@@ -210,6 +222,25 @@ void TodayScene::render(Gfx& gfx) {
   }
   gfx.fillRect(0, kHeaderH - 2, w, 2, true);
 
+  // --- Weather band ----------------------------------------------------------
+  // Drawn straight from the card the phone already sends; TodayStore has held
+  // these two strings since M3 but nothing rendered them until now.
+  int contentTop = kHeaderH + 6;
+  if (TODAY_STORE.weather()[0]) {
+    const int wy = kHeaderH + kWeatherTopPad;
+    const char* hl = TODAY_STORE.highLow();
+    const int hlW = hl[0] ? gfx.textWidth(kFontSmall, hl) : 0;
+    int condMax = w - 2 * kMarginX;
+    if (hl[0]) condMax -= hlW + kWeatherGap;
+
+    char cond[96];
+    truncateToWidth(gfx, kFontRegular, TODAY_STORE.weather(), condMax, cond, sizeof(cond));
+    gfx.drawText(kFontRegular, kMarginX, wy, cond);
+    if (hl[0]) gfx.drawText(kFontSmall, w - kMarginX - hlW, wy + kWeatherHlDrop, hl);
+
+    contentTop = kHeaderH + kWeatherBandH;
+  }
+
   // --- Empty state -----------------------------------------------------------
   Row rows[MAX_ROWS];
   const int rowCount = TODAY_STORE.hasSnapshot() ? buildRows(rows) : 0;
@@ -228,7 +259,7 @@ void TodayScene::render(Gfx& gfx) {
   }
 
   // --- Scroll clamp + overflow bookkeeping -----------------------------------
-  const int top = kHeaderH + 6;
+  const int top = contentTop;
   const int bottom = h - Scene::SOFTKEY_BAR_H - 6;
   auto rowH = [](const Row& r) {
     switch (r.type) {

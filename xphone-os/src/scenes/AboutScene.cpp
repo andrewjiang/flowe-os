@@ -7,6 +7,7 @@
 #include <cstdio>
 
 #include "../BatteryGauge.h"
+#include "../ClockStore.h"
 #include "../Fonts.h"
 #include "../NotificationStore.h"
 #include "../Sleep.h"
@@ -47,6 +48,24 @@ void AboutScene::render(Gfx& gfx) {
   // once in boot(). Tells us whether the power-button wake is DEEPSLEEP (RTC
   // would survive) or POWERON (needs NVS), and whether a scene was restored.
   snprintf(line, sizeof(line), "wake: %s  restore: %s", gWakeResetReason, gWakeRestoreScene);
+  gfx.drawText(kFontRegular, x, y, line);
+  y += gfx.lineHeight(kFontRegular) + 4;
+
+  // Phase 0 morning-meditation spec: wake→BLE-connect and wake→date latency
+  // (millis() starts ~0 at boot, so the stamps ARE the delays). This readout
+  // is the experiment — no serial cable needed.
+  if (CLOCK_STORE.firstSyncMs != 0) {
+    snprintf(line, sizeof(line), "time.sync: ble %lu ms  date %lu ms  %02u:%02u",
+             static_cast<unsigned long>(CLOCK_STORE.firstConnectMs),
+             static_cast<unsigned long>(CLOCK_STORE.firstSyncMs),
+             static_cast<unsigned>(CLOCK_STORE.minutesIntoDay / 60),
+             static_cast<unsigned>(CLOCK_STORE.minutesIntoDay % 60));
+  } else if (CLOCK_STORE.firstConnectMs != 0) {
+    snprintf(line, sizeof(line), "time.sync: ble %lu ms  date pending",
+             static_cast<unsigned long>(CLOCK_STORE.firstConnectMs));
+  } else {
+    snprintf(line, sizeof(line), "time.sync: no connect since boot");
+  }
   gfx.drawText(kFontRegular, x, y, line);
   y += gfx.lineHeight(kFontRegular) + 4;
 
