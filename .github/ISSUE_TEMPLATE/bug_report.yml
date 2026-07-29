@@ -1,0 +1,67 @@
+name: Device bug (firmware)
+description: Something on the Xteink device itself misbehaves — flashing, screens, reader, sleep, buttons, battery.
+labels: ["bug", "firmware"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time. The two fields that save the most
+        back-and-forth are **which device** and **which build** — please don't
+        skip them.
+
+  - type: dropdown
+    id: device
+    attributes:
+      label: Device
+      options:
+        - Xteink X3
+        - Xteink X4
+        - Other / not sure
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Flowe build
+      description: "Settings → About shows the version and build env (x3 / x4). If you can't get that far, say how you flashed and when you downloaded it."
+      placeholder: "e.g. 0.4.1 (x4), flashed from SD 2026-07-28"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: locked
+    attributes:
+      label: Was the device locked when you got it?
+      description: We're still building a definitive answer for locked devices — your data point helps.
+      options:
+        - "No — bought unlocked (Amazon / XTEINK site)"
+        - "Yes — unlocked it myself first"
+        - "Yes — still locked"
+        - "Not sure"
+    validations:
+      required: false
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what you got instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: serial
+    attributes:
+      label: Serial log (optional, but it usually solves it outright)
+      description: "Plug in over USB and run `pio device monitor -b 115200`, or any serial terminal at 115200 baud. Paste whatever prints around the failure."
+      render: text
+    validations:
+      required: false
+
+  - type: markdown
+    attributes:
+      value: |
+        **Reader bug?** Please also name the book and its file size — most reader
+        failures are size- or structure-dependent, and "it says unreadable" on a
+        1 MB EPUB is a very different bug from a 200 KB one.

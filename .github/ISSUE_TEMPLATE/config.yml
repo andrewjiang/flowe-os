@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Beta testing (TestFlight)
+    url: https://www.flowe.ink
+    about: Sign up for the iOS beta and get build announcements — including X4 firmware releases.
+  - name: Does it work on a locked device?
+    url: https://github.com/andrewjiang/flowe-os#install
+    about: Short answer — if you can flash CrossPoint, you can flash Flowe. Long answer, and how to get back to CrossPoint, in the README.
+  - name: Android support
+    url: https://github.com/andrewjiang/flowe-os/issues
+    about: In progress, but it's a rebuild rather than a port — the Block feature rides iOS Screen Time, which has no Android equivalent. Search existing issues before filing a new one.

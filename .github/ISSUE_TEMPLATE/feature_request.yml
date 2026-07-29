@@ -1,0 +1,52 @@
+name: Feature request
+description: Something you want Flowe to do that it doesn't.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Flowe runs on an ESP32-C3 with **no PSRAM** — after the framebuffer, SD,
+        BLE stack, and ANCS client, roughly 36 KB of heap is left. That budget is
+        why the radios take turns and why some obvious-sounding features are
+        expensive. Saying *what you're trying to do* rather than *what to build*
+        gets you a better answer, and sometimes a cheaper one that ships sooner.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: The situation, not the solution. "I want to study vocab on the bus" beats "add flashcards".
+    validations:
+      required: true
+
+  - type: textarea
+    id: today
+    attributes:
+      label: How do you handle it today?
+      description: Another app, paper, or not at all. This is the most useful field on the form — it says how much the problem actually costs you.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Where would this live?
+      options:
+        - On the device
+        - In the iPhone app
+        - Both
+        - Not sure
+    validations:
+      required: false
+
+  - type: dropdown
+    id: device
+    attributes:
+      label: Device
+      options:
+        - Xteink X3
+        - Xteink X4
+        - Both
+        - Don't have one yet
+    validations:
+      required: false
