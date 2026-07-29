@@ -1,0 +1,53 @@
+name: iOS app bug or feedback
+description: Something in the Flowe iPhone app — pairing, priorities, workouts, blocks, book sync, dictation.
+labels: ["app", "ios"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The app is closed-source, but this is the right place to report it —
+        one channel for everything beats two.
+
+  - type: input
+    id: version
+    attributes:
+      label: App version
+      description: "TestFlight shows this on the Flowe page; the app shows it in Settings → About."
+      placeholder: "e.g. 1.0 (42)"
+    validations:
+      required: true
+
+  - type: input
+    id: ios
+    attributes:
+      label: iPhone + iOS version
+      placeholder: "e.g. iPhone 14 Pro, iOS 26.1"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: paired
+    attributes:
+      label: Is a device paired?
+      options:
+        - "Yes — Xteink X3"
+        - "Yes — Xteink X4"
+        - "No, app only"
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what you got instead. Screenshots welcome.
+    validations:
+      required: true
+
+  - type: textarea
+    id: pairing
+    attributes:
+      label: If this is a pairing problem — what did the flow look like?
+      description: "How far did it get, what did the device screen show, did it ever connect before? Pairing is the flow we most want to smooth out."
+    validations:
+      required: false
