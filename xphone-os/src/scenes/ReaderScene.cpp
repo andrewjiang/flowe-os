@@ -170,8 +170,23 @@ void ReaderScene::onEnter() {
   // with the largest chapters. Reserving once here makes it deterministic.
   // Released in onExit() before the radio comes back (main.cpp explains why
   // this must NOT be parked at boot instead).
+  // Cover scratch FIRST, inflate window second. The largest post-suspend free
+  // region (~68 KB on the C3) fits the PNG-union scratch (~58 KB) OR the 32 KB
+  // dict, not both; claimed dict-first, the region's remainder (34804 bytes,
+  // live X4) can never host the scratch and PNG covers are unrenderable. So the
+  // scratch takes the big region and the dict tries the next-largest hole — and
+  // if THAT fails, the scratch is released and the dict retried, because a
+  // reserved dict is the stronger guarantee (chapter indexing) and cover-less
+  // tiles are the acceptable degradation.
+  reader::CoverThumb::preacquireScratch();
   if (!InflateReader::hasSharedDict()) {
     auto* dict = static_cast<uint8_t*>(malloc(InflateReader::kDictSize));
+    if (!dict) {
+      reader::CoverThumb::releaseScratch();
+      dict = static_cast<uint8_t*>(malloc(InflateReader::kDictSize));
+      Serial.printf("[xphone-os] reader: dict displaced cover scratch (%s)\n",
+                    dict ? "ok" : "STILL FAILED");
+    }
     if (dict) {
       InflateReader::setSharedDict(dict);
     }
@@ -654,6 +669,30 @@ void ReaderScene::scanBooks() {
       j--;
     }
     _books[j + 1] = key;
+  }
+
+  // Fast-pass: tiles whose caches already exist paint complete on the FIRST
+  // render. Reopening the Reader used to visibly re-upgrade every tile
+  // one-per-quiet-tick even though each was a ~30 ms cache hit; that belongs
+  // before first paint. Anything needing real work (book.bin build, cover
+  // decode) stays Unknown for the GridMeta tick.
+  for (int i = 0; i < _bookCount; i++) {
+    BookEntry& b = _books[i];
+    const std::unique_ptr<reader::Epub> epub(new (std::nothrow)
+                                                 reader::Epub(b.path, reader::kReaderCacheRoot));
+    if (!epub || !epub->load(/*buildIfMissing=*/false)) continue;
+    const std::string& title = epub->getTitle();
+    snprintf(b.title, sizeof(b.title), "%s", title.empty() ? baseName(b.path) : title.c_str());
+    snprintf(b.author, sizeof(b.author), "%s", epub->getAuthor().c_str());
+    std::string thumbPath;
+    const int hit = reader::CoverThumb::probe(*epub, kThumbW, kThumbH, &thumbPath);
+    if (hit == 1 && thumbPath.size() < sizeof(b.thumbPath) &&
+        readThumbDims(thumbPath.c_str(), &b.thumbW, &b.thumbH)) {
+      memcpy(b.thumbPath, thumbPath.c_str(), thumbPath.size() + 1);
+      b.meta = TileMeta::Cover;
+    } else if (hit == 0) {
+      b.meta = TileMeta::NoCover;
+    }
   }
 }
 

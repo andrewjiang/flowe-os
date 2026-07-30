@@ -41,6 +41,16 @@ class CoverThumb {
   // allocation is transient and leaves no sentinel).
   static bool ensure(Epub& epub, int w, int h, std::string* outPath);
 
+  // Cache-state peek with zero decode work: 1 = thumb file exists (outPath
+  // filled), 0 = cover.none sentinel (book is known coverless), -1 = neither
+  // (ensure() would extract + decode). For synchronous paint paths.
+  static int probe(Epub& epub, int w, int h, std::string* outPath);
+
+  // Best-effort: claim the PNG-union scratch (~58KB) while the heap is at its
+  // cleanest (scene enter, right after BLE suspends). Lazy mid-pass acquisition
+  // fails under fragmentation for PNG covers; JPEG's smaller ask still works.
+  static void preacquireScratch();
+
   // Free the shared decoder scratch block (~58KB). Call when leaving the book
   // grid to open a book, so section indexing / reading get the full heap back —
   // the block reallocates lazily the next time a cover is decoded.

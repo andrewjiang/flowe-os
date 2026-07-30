@@ -36,17 +36,38 @@ namespace {
 // cover reuses it instead of re-requesting a 58KB contiguous block that a
 // BLE-active fragmented heap routinely can't satisfy. CoverThumb::releaseScratch
 // frees it when the reader leaves the grid to open a book.
-constexpr size_t kDecoderScratchSize = sizeof(PNG) > sizeof(JPEGDEC) ? sizeof(PNG) : sizeof(JPEGDEC);
+// Per-format scratch. sizeof(PNG) embeds PNG_MAX_BUFFERED_PIXELS row buffers
+// (~50 KB) while JPEGDEC — the common cover format — needs roughly half that.
+// Sizing to the union meant JPEG covers failed whenever no PNG-sized hole
+// existed (live X4 repro: "alloc failed (80244 free)" — free, not contiguous).
+// Allocate what the sniffed format needs; grow-only so a JPEG→PNG→JPEG grid
+// pass doesn't thrash, and a transient miss stays retryable on a later tick.
 uint8_t* g_decoderScratch = nullptr;
+size_t g_decoderScratchSize = 0;
 
-// Returns the shared scratch, allocating it once. Null only if even the
-// one-time allocation failed (heap genuinely exhausted) — a transient miss the
-// caller retries on a later tick.
-uint8_t* acquireDecoderScratch() {
+// Smallest ask that already failed this grid session. Fragmentation doesn't
+// heal between quiet ticks, so retrying an equal-or-bigger ask every pass just
+// burns ~600 ms per grid entry re-extracting the image before failing again.
+// Reset by preacquireScratch()/releaseScratch() (i.e., next Reader entry).
+size_t g_scratchFailedNeed = 0;
+
+uint8_t* acquireDecoderScratch(size_t need) {
+  if (g_decoderScratch && g_decoderScratchSize < need) {
+    free(g_decoderScratch);
+    g_decoderScratch = nullptr;
+    g_decoderScratchSize = 0;
+  }
   if (!g_decoderScratch) {
-    g_decoderScratch = static_cast<uint8_t*>(malloc(kDecoderScratchSize));
-    if (!g_decoderScratch) {
-      LOG_DBG("CVR", "Decoder scratch alloc failed (%u free)", ESP.getFreeHeap());
+    if (g_scratchFailedNeed && need >= g_scratchFailedNeed) {
+      return nullptr;  // already proven unfit this session; fail fast, no log spam
+    }
+    g_decoderScratch = static_cast<uint8_t*>(malloc(need));
+    if (g_decoderScratch) {
+      g_decoderScratchSize = need;
+    } else {
+      g_scratchFailedNeed = need;
+      LOG_DBG("CVR", "Decoder scratch alloc failed (need %u, free %u, largest %u)",
+              static_cast<unsigned>(need), ESP.getFreeHeap(), ESP.getMaxAllocHeap());
     }
   }
   return g_decoderScratch;
@@ -268,10 +289,11 @@ int jpegDrawCb(JPEGDRAW* pDraw) {
 }
 
 DecodeResult decodeJpegThumb(HalFile& imgFile, HalFile& binOut, const int maxW, const int maxH) {
-  uint8_t* scratch = acquireDecoderScratch();
+  // JPEG asks only for its own ~21KB struct — never the ~58KB PNG union.
+  uint8_t* scratch = acquireDecoderScratch(sizeof(JPEGDEC));
   if (!scratch) return DecodeResult::Transient;
 
-  JPEGDEC* jpeg = new (scratch) JPEGDEC();  // ~21KB — placement-new into the shared scratch
+  JPEGDEC* jpeg = new (scratch) JPEGDEC();  // placement-new into the shared scratch
 
   s_jpegFile = &imgFile;
   const ScopedCleanup cleanup{[jpeg] {
@@ -467,7 +489,7 @@ DecodeResult decodePngThumb(HalFile& imgFile, HalFile& binOut, const int maxW, c
   // live inside the struct). Requesting that as a fresh contiguous block on the
   // fragmented BLE-active heap routinely fails — that is precisely why PNG-cover
   // books never rendered a cover. Run out of the retained shared scratch instead.
-  uint8_t* scratch = acquireDecoderScratch();
+  uint8_t* scratch = acquireDecoderScratch(sizeof(PNG));
   if (!scratch) return DecodeResult::Transient;
 
   PNG* png = new (scratch) PNG();
@@ -566,6 +588,17 @@ void writeNoneSentinel(const std::string& nonePath) {
 
 }  // namespace
 
+int CoverThumb::probe(Epub& epub, const int w, const int h, std::string* outPath) {
+  const std::string& cache = epub.getCachePath();
+  std::string binPath = cache + "/cover_" + std::to_string(w) + "x" + std::to_string(h) + ".bin";
+  if (Storage.exists(binPath.c_str())) {
+    if (outPath) *outPath = std::move(binPath);
+    return 1;
+  }
+  if (Storage.exists((cache + "/cover.none").c_str())) return 0;
+  return -1;
+}
+
 bool CoverThumb::ensure(Epub& epub, const int w, const int h, std::string* outPath) {
   if (w <= 0 || h <= 0 || w > kMaxThumbW || h > kMaxThumbH) {
     LOG_ERR("CVR", "Bad thumb size %dx%d", w, h);
@@ -650,10 +683,19 @@ bool CoverThumb::ensure(Epub& epub, const int w, const int h, std::string* outPa
   return true;
 }
 
+void CoverThumb::preacquireScratch() {
+  // Union of both decoder structs — grow-only acquire keeps this block for
+  // every later per-format request in the same grid session.
+  g_scratchFailedNeed = 0;  // fresh scene, fresh heap — allow one new attempt
+  acquireDecoderScratch(sizeof(PNG) > sizeof(JPEGDEC) ? sizeof(PNG) : sizeof(JPEGDEC));
+}
+
 void CoverThumb::releaseScratch() {
+  g_scratchFailedNeed = 0;
   if (g_decoderScratch) {
     free(g_decoderScratch);
     g_decoderScratch = nullptr;
+    g_decoderScratchSize = 0;
   }
 }
 

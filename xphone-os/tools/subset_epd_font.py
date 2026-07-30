@@ -35,7 +35,16 @@ Verify an already-emitted header without regenerating:
 import re
 import sys
 
-FIRST, LAST = 0x20, 0x7E  # printable ASCII, inclusive
+# Kept ranges, each emitted as one EpdUnicodeInterval (so every range must be
+# contiguously covered by the original font — the x4-os Ubuntu originals are).
+# ASCII + Latin-1 Supplement + Latin Extended-A: book titles/authors on the
+# grid ("Karamázov", "Fiódor") rendered '?' with the ASCII-only subset.
+RANGES = [(0x20, 0x7E), (0xA0, 0xFF), (0x100, 0x17F)]
+
+
+def kept_codepoints():
+    for first, last in RANGES:
+        yield from range(first, last + 1)
 
 
 def strip_comments(text):
@@ -111,7 +120,7 @@ def subset(bitmaps, glyphs, intervals):
     """Return (new_bitmap: bytes, new_glyphs: list of 7-tuples in cp order)."""
     out_bmp = bytearray()
     out_glyphs = []
-    for cp in range(FIRST, LAST + 1):
+    for cp in kept_codepoints():
         g = glyph_for(cp, glyphs, intervals, "original")
         if g is None:
             raise SystemExit(f"codepoint U+{cp:04X} not covered by the original font")
@@ -129,7 +138,7 @@ def verify(orig, emitted):
     bytes. Coverage must agree on both sides."""
     obmp, oglyphs, ointervals = orig
     nbmp, nglyphs, nintervals = emitted
-    for cp in range(FIRST, LAST + 1):
+    for cp in kept_codepoints():
         og = glyph_for(cp, oglyphs, ointervals, "original")
         ng = glyph_for(cp, nglyphs, nintervals, "emitted")
         assert (og is None) == (ng is None), (
@@ -154,7 +163,8 @@ def emit(out_path, name, new_bmp, new_glyphs):
     lines = []
     a = lines.append
     a("/**")
-    a(f" * ASCII (U+0020..U+007E) subset of {name} — generated, do not hand-edit.")
+    ranges_desc = " + ".join(f"U+{f:04X}..U+{l:04X}" for f, l in RANGES)
+    a(f" * Subset ({ranges_desc}) of {name} — generated, do not hand-edit.")
     a(" * M2.1c flash diet: only the Bitmaps/Glyphs/Intervals arrays are emitted")
     a(" * (kern/ligature/EpdFontData tables of the original were unreferenced).")
     a(" * Regenerate from the xphone-os directory with:")
@@ -169,8 +179,7 @@ def emit(out_path, name, new_bmp, new_glyphs):
     a("};")
     a("")
     a(f"static const EpdGlyph {name}Glyphs[] = {{")
-    for i, g in enumerate(new_glyphs):
-        cp = FIRST + i
+    for cp, g in zip(kept_codepoints(), new_glyphs):
         # NEVER emit a raw glyph char in the comment: a lone '\' at end of a
         # //-comment line splices the next array entry into the comment (C
         # translation phase 2) and silently deletes it. Label by codepoint.
@@ -178,7 +187,10 @@ def emit(out_path, name, new_bmp, new_glyphs):
     a("};")
     a("")
     a(f"static const EpdUnicodeInterval {name}Intervals[] = {{")
-    a("    { 0x%X, 0x%X, 0 }," % (FIRST, LAST))
+    offset = 0
+    for first, last in RANGES:
+        a("    { 0x%X, 0x%X, 0x%X }," % (first, last, offset))
+        offset += last - first + 1
     a("};")
     a("")
     open(out_path, "w").write("\n".join(lines))

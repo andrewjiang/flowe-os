@@ -52,6 +52,9 @@ class FileTransferScene : public Scene {
   char _password[64] = {0};
   char _ip[16] = {0};
   const char* _failReason = "";
+  // Non-zero only for radio-down failures (join timeout / server start):
+  // arms the Failed-state auto-restart that brings BLE back for the phone.
+  uint32_t _failedAtMs = 0;
   uint32_t _connectStartMs = 0;
   uint32_t _lastPollMs = 0;
 

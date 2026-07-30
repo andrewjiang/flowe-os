@@ -18,6 +18,10 @@ constexpr int kMarginX = 20;  // matches SettingsScene / CrossPoint contentSideP
 constexpr int kHeaderH = 46;
 
 constexpr uint32_t kStaTimeoutMs = 20000;
+// How long a radio-down failure lingers on glass before the auto-restart
+// that restores BLE (long enough to read; short enough that the phone's
+// wait feels like a hiccup, not a hang).
+constexpr uint32_t kFailedLingerMs = 6000;
 // CrossPoint pumps up to 500 handleClient calls per activity loop; our main
 // loop already ticks every 10 ms and one call drains one full request
 // synchronously, so a small burst per tick is enough.
@@ -30,6 +34,7 @@ void FileTransferScene::onEnter() {
   _state = State::Idle;
   _radioWasUp = false;
   _failReason = "";
+  _failedAtMs = 0;
   _ip[0] = '\0';
   _shownRequests = 0;
   _shownKb = 0;
@@ -89,7 +94,11 @@ void FileTransferScene::stopAndRestart() {
 }
 
 void FileTransferScene::startSta() {
-  Serial.printf("[xphone-os] transfer: joining \"%s\" (heap %u)\n", _ssid, ESP.getFreeHeap());
+  _failedAtMs = 0;  // a RETRY re-arms the join; the linger clock belongs to Failed only
+  // pw LENGTH only, never the text: length mismatches expose paste/truncation
+  // bugs (reason=15 loops) without putting the secret on a serial port.
+  Serial.printf("[xphone-os] transfer: joining \"%s\" (pw len=%u, heap %u)\n", _ssid,
+                static_cast<unsigned>(strlen(_password)), ESP.getFreeHeap());
   // Tell the phone what is about to happen, THEN drop BLE: the X3 idles at
   // ~39 KB free with BLE+ANCS up and esp_wifi needs ~50 KB, so the two
   // stacks cannot coexist (measured abort on WiFi.mode with BLE running).
@@ -103,6 +112,17 @@ void FileTransferScene::startSta() {
 
   _radioWasUp = true;
   WiFi.persistent(false);   // creds live in our NVS keys, not the SDK blob
+  // Diagnosis rail: the join loop only ever sees WL_DISCONNECTED (status=6)
+  // and can't say WHY association fails. The SDK's disconnect event carries
+  // the 802.11 reason code (2=AUTH_EXPIRE, 15/204=4-way handshake = wrong
+  // password, 201=NO_AP_FOUND — see esp_wifi_types.h wifi_err_reason_t);
+  // log every one. Captureless lambda: no heap, survives the scene.
+  WiFi.onEvent(
+      [](WiFiEvent_t, WiFiEventInfo_t info) {
+        Serial.printf("[xphone-os] transfer: STA disconnect reason=%d\n",
+                      static_cast<int>(info.wifi_sta_disconnected.reason));
+      },
+      ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);     // modem sleep costs throughput (CrossPoint keeps it off too)
   WiFi.setHostname(kHostname);
@@ -131,7 +151,12 @@ void FileTransferScene::pollConnecting() {
     WiFi.disconnect(true);
     _failReason = "Could not join Wi-Fi";
     _state = State::Failed;
-    COMPANION_BLE.sendTransferStatus("failed", nullptr, _failReason);
+    // BLE died in startSta(), so a "failed" notify here is a silent no-op
+    // (CompanionBleService guard) — the phone would wait forever for a
+    // server that never comes. Render the reason, then let the Failed tick
+    // auto-restart per the session contract (restart restores BLE; the
+    // phone reconnects and un-strands). RETRY within the window still works.
+    _failedAtMs = now;
     markDirty();
   }
 }
@@ -143,7 +168,7 @@ void FileTransferScene::startServerOrFail() {
   if (!_server.begin()) {
     _failReason = "Server failed to start";
     _state = State::Failed;
-    COMPANION_BLE.sendTransferStatus("failed", nullptr, _failReason);
+    _failedAtMs = millis();  // BLE is down here too — same stranding as the join timeout
     markDirty();
     return;
   }
@@ -215,7 +240,19 @@ void FileTransferScene::handleInput(Input& in) {
         exitScene();
         return;
       }
-      if (in.wasPressed(Btn::Confirm) && _ssid[0]) startSta();
+      if (in.wasPressed(Btn::Confirm) && _ssid[0]) {
+        startSta();
+        return;
+      }
+      // Radio-down failures (join timeout / server start) can't notify the
+      // phone — BLE is gone. After a readable pause, exit via the normal
+      // restart path so BLE returns and the phone reconnects. _failedAtMs
+      // stays 0 for needs-wifi (BLE still up), which keeps its RETRY screen.
+      if (_failedAtMs && millis() - _failedAtMs > kFailedLingerMs) {
+        Serial.println("[xphone-os] transfer: failed with radio down; restarting to restore BLE");
+        exitScene();
+        return;
+      }
       break;
   }
 }

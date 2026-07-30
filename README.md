@@ -1,6 +1,6 @@
 # Flowe OS
 
-Open-source firmware for the pocket-size [Xteink X3](https://www.xteink.com)
+Open-source firmware for the pocket-size [Xteink X3 or X4](https://www.xteink.com)
 e-ink device. Paired with the Flowe iOS app, it puts your priorities, agenda,
 and notifications on calm paper-like glass — and starts focus blocks that
 shield the apps you choose on your iPhone.
@@ -8,8 +8,7 @@ shield the apps you choose on your iPhone.
 Part of [Flowe](https://www.flowe.ink). Firmware is MIT-licensed;
 vendored libraries keep their own licenses.
 
-**Requires:** an Xteink X3 (hardware-tested; the X4 target compiles but is
-unvalidated) and an iPhone with the Flowe companion app for everything
+**Requires:** an Xteink X3 or X4 (both hardware-validated as of fw-v0.3.0) and an iPhone with the Flowe companion app for everything
 beyond reading.
 
 <p align="center">
@@ -85,7 +84,7 @@ and 2.5 MB of its 6.5 MB app partition.
 ## Install
 
 Grab `update.bin` from [Releases](https://github.com/andrewjiang/flowe-os/releases) —
-it's the X3 image, pre-named for the SD updater —
+grab the zip for your device (flowe-x3 or flowe-x4); each contains the image, pre-named for the SD updater —
 or follow the step-by-step guide at
 [www.flowe.ink/flash](https://www.flowe.ink/flash).
 
@@ -106,6 +105,7 @@ is how this firmware was developed.
 ```sh
 cd xphone-os
 pio run -e x3            # Xteink X3 (hardware-validated)
+pio run -e x4            # Xteink X4 (hardware-validated)
 pio run -e x4            # Xteink X4 (compiles; not validated on hardware)
 pio run -e x3 -t upload  # flash your build over USB
 pio device monitor --baud 115200
