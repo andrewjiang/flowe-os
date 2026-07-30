@@ -84,7 +84,7 @@ and 2.5 MB of its 6.5 MB app partition.
 ## Install
 
 Grab `update.bin` from [Releases](https://github.com/andrewjiang/flowe-os/releases) —
-grab the zip for your device (flowe-x3 or flowe-x4); each contains the image, pre-named for the SD updater —
+grab the zip for your device (flowe-x3 or flowe-x4); each contains the image. Changelogs live in the [release notes](https://github.com/andrewjiang/flowe-os/releases) — each release lists what changed on the device, pre-named for the SD updater —
 or follow the step-by-step guide at
 [www.flowe.ink/flash](https://www.flowe.ink/flash).
 
