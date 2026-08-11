@@ -19,6 +19,7 @@
 #include <Arduino.h>
 #include <BoardConfig.h>
 #include <EInkDisplay.h>
+#include <InflateReader.h>
 #include <SPI.h>
 
 #include <freertos/FreeRTOS.h>
@@ -54,14 +55,11 @@ static EInkDisplay display(BoardConfig::DEFAULT_DEVICE.display.sclk, BoardConfig
 static Gfx gfx(display);
 static Input input;
 
-// M2.1b (power lever 3): CPU clock after boot, MHz. ESP32-C3 BLE requires
-// >= 80 MHz (the ESP-IDF BT port refuses lower; the BLE modem clock itself is
-// sourced independently of the CPU PLL), so 80 is the floor AND the target —
-// ~30-40% lower active/idle core power vs the prebuilt core's 160 MHz
-// default. Override without editing code: build_flags -DXP_CPU_MHZ=160.
-#ifndef XP_CPU_MHZ
-#define XP_CPU_MHZ 80
-#endif
+// M2.1b (power lever 3): XP_CPU_MHZ (default 80) now lives in CpuBoost.h,
+// together with the work-scoped 160 MHz guard the reader uses around
+// CPU-bound jobs (indexing, page compose, cover decode). The park below at
+// Stage 6 and the guard's restore target are the same constant by design.
+#include "CpuBoost.h"
 
 // ---------------------------------------------------------------------------
 // Boot splash — the very first frame on glass. The panel's first two FULL
@@ -234,14 +232,23 @@ static void boot() {
   // solicitation UUID in the adv packet); the ANCS client arms itself and
   // starts service discovery once an iPhone connects and the link
   // authenticates (that is when iOS shows its pairing prompt).
-  // NOTE: do NOT reserve reader buffers here. Measured on X3: parking the
-  // 32 KB inflate dict before BLE left ~3.5 KB free and starved the BLE
-  // stack itself (BLE_INIT malloc failures, ANCS discovery dead, endless
-  // connect/disconnect). Radio and reader take turns instead — the Reader
-  // scene suspends BLE on entry and resumes it on exit (CrossPoint's model:
-  // it also never runs its reader and companion BLE at the same time).
-  // The inflate dict IS reserved, just later: ReaderScene::onEnter parks it
-  // right after the BLE suspend, when contiguous heap peaks.
+  // Inflate dict: static BSS, installed once here. The old "do NOT reserve
+  // reader buffers before BLE" rule came from a ~3.5 KB-free measurement
+  // that predates radio turn-taking (the radio is down for the whole Reader
+  // scene and returns on exit; a BLE-connected shelf was tried and starved —
+  // full bring-up beside Reader residency left 1.3 KB free). Heap-parking was also
+  // moot in practice: the running heap never has a 32 KB contiguous hole on
+  // X3-class devices (103 KB free, largest block 29684 measured), so every
+  // reserve attempt failed and zip reads fell to one-shot mode. As static
+  // BSS the dict never competes for heap and never fragments it. Open risk
+  // being validated: Wi-Fi file transfer must fit in the ~32 KB-smaller
+  // heap alongside this (FileTransferScene can no longer free the dict).
+  // NO permanent dict: the static-BSS experiment left X3 BLE with 3.8 KB free
+  // (min 3652) — links formed but discovery-time allocations failed and iOS
+  // hung at "discovering services". The dict is claimed at Reader suspend
+  // (suspendRadioForBookWork) and freed on exit; when the post-suspend claim
+  // loses to fragmentation, big-chapter indexing degrades to a retryable
+  // "Couldn't index" (never a panic) until the fragmenter fix lands.
   COMPANION_BLE.begin();
   COMPANION_ANCS.begin();
   COMPANION_ANCS.requestPairing();

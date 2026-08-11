@@ -5,6 +5,7 @@
 #include <HalStorage.h>
 #include <Utf8.h>
 #include <XmlParserUtils.h>
+#include <esp_heap_caps.h>
 #include <expat.h>
 
 #include <algorithm>
@@ -134,6 +135,12 @@ bool ChapterHtmlSlimParser::resetCurrentTextBlock(const BlockStyle& blockStyle) 
   currentTextBlock.reset(new (std::nothrow) ParsedText(extraParagraphSpacing, blockStyle));
   if (!currentTextBlock) {
     LOG_ERR("EHP", "Out of memory while creating text block");
+    parseFailed = true;
+    return false;
+  }
+  if (!currentTextBlock->init()) {
+    LOG_ERR("EHP", "Heap too tight to reserve text block word storage");
+    currentTextBlock.reset();
     parseFailed = true;
     return false;
   }
@@ -525,20 +532,6 @@ void XMLCALL ChapterHtmlSlimParser::characterData(void* userData, const XML_Char
 
     self->partWordBuffer[self->partWordBufferIndex++] = s[i];
   }
-
-  // If we have > 750 words buffered up, perform the layout and consume out all but the last line.
-  // There should be enough here to build out 1-2 full pages and doing this will free up a lot of
-  // memory (spotted on books with very long text blocks).
-  if (self->currentTextBlock && self->currentTextBlock->size() > 750) {
-    LOG_DBG("EHP", "Text block too long, splitting into multiple pages");
-    const int horizontalInset = self->currentTextBlock->getBlockStyle().totalHorizontalInset();
-    const uint16_t effectiveWidth = (horizontalInset < self->viewportWidth)
-                                        ? static_cast<uint16_t>(self->viewportWidth - horizontalInset)
-                                        : self->viewportWidth;
-    self->currentTextBlock->layoutAndExtractLines(
-        self->renderer, self->fontId, effectiveWidth,
-        [self](const std::shared_ptr<TextBlock>& textBlock) { self->addLineToPage(textBlock); }, false);
-  }
 }
 
 void XMLCALL ChapterHtmlSlimParser::defaultHandlerExpand(void* userData, const XML_Char* s, const int len) {
@@ -738,6 +731,18 @@ bool ChapterHtmlSlimParser::parseAndBuildPages() {
   return true;
 }
 
+// A page holds ~viewportHeight/lineHeight lines; reserving up front avoids the
+// doubling reallocs from elements.push_back. reserve() throws on OOM
+// (-fno-exceptions → abort), so skip it when the largest free block is tight —
+// push_back then grows in the usual small steps.
+void ChapterHtmlSlimParser::reservePageElements() {
+  const int lineHeight = std::max(1, static_cast<int>(renderer.getLineHeight(fontId) * lineCompression));
+  const size_t lineCapacity = static_cast<size_t>(viewportHeight / lineHeight) + 4;
+  const size_t askBytes = lineCapacity * sizeof(std::shared_ptr<PageElement>);
+  if (heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) < askBytes + 4096) return;
+  currentPage->elements.reserve(lineCapacity);
+}
+
 void ChapterHtmlSlimParser::addLineToPage(std::shared_ptr<TextBlock> line) {
   const int lineHeight = renderer.getLineHeight(fontId) * lineCompression;
 
@@ -749,6 +754,7 @@ void ChapterHtmlSlimParser::addLineToPage(std::shared_ptr<TextBlock> line) {
       return;
     }
     currentPageNextY = 0;
+    reservePageElements();
   }
 
   if (currentPageNextY + lineHeight > viewportHeight) {
@@ -761,11 +767,18 @@ void ChapterHtmlSlimParser::addLineToPage(std::shared_ptr<TextBlock> line) {
       return;
     }
     currentPageNextY = 0;
+    reservePageElements();
   }
 
   // Apply horizontal left inset (margin + padding) as x position offset
   const int16_t xOffset = line->getBlockStyle().leftInset();
-  currentPage->elements.push_back(std::make_shared<PageLine>(line, xOffset, currentPageNextY));
+  auto pageLine = std::shared_ptr<PageLine>(new (std::nothrow) PageLine(std::move(line), xOffset, currentPageNextY));
+  if (!pageLine) {
+    LOG_ERR("EHP", "Failed to create PageLine");
+    parseFailed = true;
+    return;
+  }
+  currentPage->elements.push_back(pageLine);
   currentPageNextY += lineHeight;
 }
 
@@ -783,6 +796,7 @@ void ChapterHtmlSlimParser::makePages() {
       return;
     }
     currentPageNextY = 0;
+    reservePageElements();
   }
 
   const int lineHeight = renderer.getLineHeight(fontId) * lineCompression;
@@ -804,6 +818,11 @@ void ChapterHtmlSlimParser::makePages() {
   currentTextBlock->layoutAndExtractLines(
       renderer, fontId, effectiveWidth,
       [this](const std::shared_ptr<TextBlock>& textBlock) { addLineToPage(textBlock); });
+  if (currentTextBlock->hasLayoutFailed()) {
+    LOG_ERR("EHP", "Out of memory while extracting lines");
+    parseFailed = true;
+    return;
+  }
 
   // Apply bottom spacing after the paragraph (stored in pixels)
   if (blockStyle.marginBottom > 0) {

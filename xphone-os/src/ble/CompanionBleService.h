@@ -55,6 +55,13 @@ class CompanionBleService final {
   // resumes it on exit.
   void suspendForReader();
   void resumeAfterReader();
+  // Free every heap block this service still owns from the connected era
+  // (card JSON mirrors, pending inbound slices, status string). Runs as the
+  // tail of suspendForReader(): tiny survivors otherwise sit mid-heap and
+  // split the contiguous 32 KB the reader needs (measured on X3). All of it
+  // is recoverable — parsed stores are fixed buffers, NVS keeps the last
+  // real card, the phone re-pushes on reconnect.
+  void releaseReaderTransients();
 
   bool isStarted() const { return started; }
   bool isConnected() const;

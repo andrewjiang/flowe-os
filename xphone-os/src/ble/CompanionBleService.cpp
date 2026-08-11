@@ -353,7 +353,34 @@ void CompanionBleService::stopAdvertising() {
 
 void CompanionBleService::shutdownForTransfer() { shutdownRadio(/*releaseMemory=*/true, "File Transfer"); }
 
-void CompanionBleService::suspendForReader() { shutdownRadio(/*releaseMemory=*/false, "Reading"); }
+void CompanionBleService::suspendForReader() {
+  shutdownRadio(/*releaseMemory=*/false, "Reading");
+  releaseReaderTransients();
+}
+
+void CompanionBleService::releaseReaderTransients() {
+  // The reader is about to claim one contiguous 32 KB inflate window from
+  // the plain that deinit just returned. Any heap block this service still
+  // owns from the connected era sits INSIDE that plain and splits it —
+  // FRAGMAP 2026-08-06 measured ~32 B of string survivors capping the
+  // largest free block at 31,732 B of 103 KB free, one KB short of the
+  // window. Everything freed here is recoverable: the parsed card stores
+  // (fixed buffers) keep rendering, sleep-persist skip-writes empty mirrors
+  // so NVS keeps the last real card, boot re-seeds from NVS, and the phone
+  // re-pushes fresh cards on reconnect. Pending inbound multi-part slices
+  // are dead the moment the link drops; the phone resends whole snapshots.
+  ensureMutex();
+  xSemaphoreTake(stateMutex, portMAX_DELAY);
+  std::string().swap(lastTodayCardJson);
+  std::string().swap(lastWorkoutCardJson);
+  for (auto& p : pendingPayloads) std::string().swap(p);
+  pendingHead = 0;
+  pendingCount = 0;
+  std::string().swap(statusMessage);
+  statusMessage = "Bluetooth off";  // 13 chars: small-string optimized, no heap
+  ++revision;
+  xSemaphoreGive(stateMutex);
+}
 
 void CompanionBleService::resumeAfterReader() {
   if (started) return;

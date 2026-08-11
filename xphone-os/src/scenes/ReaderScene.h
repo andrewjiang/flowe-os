@@ -118,6 +118,16 @@ class ReaderScene : public Scene {
   reader::ReaderSettings _settings;
   std::string _bookPath;
 
+  // True once BLE is suspended and the 32 KB dict + cover scratch are claimed
+  // for book work (open / tile builds). The cached grid runs radio-up; this
+  // flips at the first real work and onExit resumes the radio.
+  bool _radioSuspended = false;
+  // Framebuffer pointer captured in render() for the runWork() dict loan
+  // (the static BSS framebuffer doubles as the 32 KB inflate window while
+  // blocking work runs — flush is idle and render() repaints after).
+  uint8_t* _fbForLoan = nullptr;
+  void suspendRadioForBookWork();
+
   int _spine = 0;
   uint16_t _nextPage = 0;  // page to apply when the section (re)loads
   // Font-size cycle position restore: ratio -> page needs the NEW pageCount,

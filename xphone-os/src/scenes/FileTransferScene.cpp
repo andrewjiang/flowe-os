@@ -106,8 +106,8 @@ void FileTransferScene::startSta() {
   COMPANION_BLE.sendTransferStatus("connecting", nullptr, _ssid);
   delay(600);  // one low-duty conn interval so the notify actually transmits
   COMPANION_BLE.shutdownForTransfer();
-  // The reader can't run during a transfer; give any reserved decompression
-  // memory to Wi-Fi. The session always ends in esp_restart().
+  // If ReaderScene left a 32 KB inflate dict parked, esp_wifi needs that
+  // heap back. Usually a no-op (the dict lives only while Reader is up).
   InflateReader::releaseSharedDict();
 
   _radioWasUp = true;

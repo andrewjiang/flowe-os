@@ -579,11 +579,34 @@ ImgFormat sniffFormat(const std::string& imgPath, const std::string& coverHref) 
 }
 
 // One-byte sentinel: "this book's cover failed to decode, don't retry".
+// The byte is a VERSION ('2'). Sentinels written before the 0.3.x decoder
+// fixes (empty files or a 0x00 byte) were often set by failures that are now
+// fixed — the X3 'Elon book' cover survived its bugfix because a stale
+// sentinel kept suppressing the retry. A non-current sentinel is deleted so
+// the decode runs once more under the fixed pipeline; genuinely broken images
+// re-sentinel with the current version.
+constexpr uint8_t kNoneSentinelVersion = '2';
+
 void writeNoneSentinel(const std::string& nonePath) {
   HalFile f;
   if (!Storage.openFileForWrite("CVR", nonePath, f)) return;
-  f.write(static_cast<uint8_t>(0));
+  f.write(kNoneSentinelVersion);
   f.flush();
+}
+
+// True only for a current-version sentinel; legacy ones are removed en route.
+bool noneSentinelCurrent(const std::string& nonePath) {
+  if (!Storage.exists(nonePath.c_str())) return false;
+  uint8_t v = 0;
+  {
+    HalFile f;
+    if (Storage.openFileForRead("CVR", nonePath, f) && f.read(&v, 1) == 1 &&
+        v == kNoneSentinelVersion) {
+      return true;
+    }
+  }
+  Storage.remove(nonePath.c_str());
+  return false;
 }
 
 }  // namespace
@@ -595,7 +618,7 @@ int CoverThumb::probe(Epub& epub, const int w, const int h, std::string* outPath
     if (outPath) *outPath = std::move(binPath);
     return 1;
   }
-  if (Storage.exists((cache + "/cover.none").c_str())) return 0;
+  if (noneSentinelCurrent(cache + "/cover.none")) return 0;
   return -1;
 }
 
@@ -613,7 +636,7 @@ bool CoverThumb::ensure(Epub& epub, const int w, const int h, std::string* outPa
   }
 
   const std::string nonePath = cache + "/cover.none";
-  if (Storage.exists(nonePath.c_str())) return false;
+  if (noneSentinelCurrent(nonePath)) return false;
 
   std::string coverHref;
   if (!epub.getCoverHref(&coverHref)) return false;  // no cover: caller renders a text-only tile

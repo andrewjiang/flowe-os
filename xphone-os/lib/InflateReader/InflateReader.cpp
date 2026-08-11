@@ -12,14 +12,37 @@ constexpr size_t INFLATE_DICT_SIZE = InflateReader::kDictSize;
 
 uint8_t* gSharedDict = nullptr;
 bool gSharedDictInUse = false;
+// True while gSharedDict points at a LENT buffer (the framebuffer) rather
+// than a heap allocation this module owns.
+bool gSharedDictBorrowed = false;
 }
 
 void InflateReader::setSharedDict(uint8_t* dict) {
   gSharedDict = dict;
   gSharedDictInUse = false;
+  gSharedDictBorrowed = false;
+}
+
+void InflateReader::lendDict(uint8_t* buf) {
+  if (gSharedDict && !gSharedDictBorrowed) return;  // real heap dict parked: keep it
+  if (gSharedDictInUse) return;                     // mid-inflate: don't swap the ring
+  gSharedDict = buf;
+  gSharedDictInUse = false;
+  gSharedDictBorrowed = true;
+}
+
+void InflateReader::returnDict() {
+  if (!gSharedDictBorrowed) return;
+  if (gSharedDictInUse) {
+    Serial.println("[xphone-os] InflateReader: lent dict still in use at return — lifetime bug");
+  }
+  gSharedDict = nullptr;
+  gSharedDictInUse = false;
+  gSharedDictBorrowed = false;
 }
 
 void InflateReader::releaseSharedDict() {
+  if (gSharedDictBorrowed) return;  // loan: returnDict() owns the lifecycle
   if (gSharedDict && !gSharedDictInUse) {
     free(gSharedDict);
     gSharedDict = nullptr;
@@ -38,16 +61,17 @@ bool InflateReader::init(const bool streaming) {
   deinit();  // free any previously allocated ring buffer and reset state
 
   if (streaming) {
-    ringBuffer = static_cast<uint8_t*>(malloc(INFLATE_DICT_SIZE));
-    if (!ringBuffer && gSharedDict && !gSharedDictInUse) {
-      // Heap too fragmented for a fresh 32 KB block: borrow the reserved
-      // dictionary. Logged because reaching here means the pre-fix build
-      // would have failed this inflate outright.
-      LOG_INF("ZIP", "Fresh 32 KB window unavailable (largest block %u) - borrowing reserved dict",
-              static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
+    if (gSharedDict && !gSharedDictInUse) {
+      // Borrow the reserved dictionary FIRST — it exists precisely for this
+      // (static BSS since boot). Malloc is the fallback for nested inflates
+      // only: on X3-class heaps a fresh 32 KB block never exists, and on the
+      // X4 the old malloc-first order churned a transient 32 KB block per
+      // streaming open while the reserved dict sat idle.
       gSharedDictInUse = true;
       usingSharedDict = true;
       ringBuffer = gSharedDict;
+    } else {
+      ringBuffer = static_cast<uint8_t*>(malloc(INFLATE_DICT_SIZE));
     }
     if (!ringBuffer) {
       LOG_ERR("ZIP", "No 32 KB inflate window: largest block %u, free %u, reserved dict %s",

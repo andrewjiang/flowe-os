@@ -225,7 +225,15 @@ void SceneManager::renderIfDirty(Gfx& gfx) {
 void SceneManager::ensureFlushTask(Gfx& gfx) {
   _flushGfx = &gfx;
   if (_flushTask) return;
-  xTaskCreate(&SceneManager::flushTrampoline, "xp_flush", 4096, this, 1, &_flushTask);
+  // Static stack + TCB (BSS), not xTaskCreate's heap pair: this task lives
+  // forever, and its heap-era stack was the ~4.5 KB boot-time wall bounding
+  // the reader's post-suspend free plain from below — measured one block
+  // shy of the contiguous 32 KB inflate window (FRAGMAP 2026-08-06). In
+  // BSS it can't split the heap. IDF's StackType_t is uint8_t, so the
+  // element count is the byte count.
+  static StaticTask_t tcb;
+  alignas(8) static StackType_t stack[4096];
+  _flushTask = xTaskCreateStatic(&SceneManager::flushTrampoline, "xp_flush", sizeof(stack), this, 1, stack, &tcb);
 }
 
 void SceneManager::dispatchFlush(const FlushReq req, const XpRect& rect) {

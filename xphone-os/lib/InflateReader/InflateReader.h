@@ -40,29 +40,30 @@ class InflateReader {
  public:
   static constexpr size_t kDictSize = 32768;
 
-  // Shared dictionary, parked by whoever owns the radio-free window.
-  //
-  // The 32 KB streaming window must be CONTIGUOUS. A per-use malloc for it
-  // runs late — after cover decoding and section allocations have chopped up
-  // the heap — and on the X3 it routinely fails there, which is what broke
-  // chapter indexing on books with large chapters (ZipFile's one-shot
-  // fallback allocates the whole inflated file instead, so it rescues small
-  // container.xml/content.opf reads but never a chapter).
-  //
-  // It is NOT parked at boot: measured on X3, reserving it before BLE
-  // starts left ~3.5 KB free and starved the BLE stack itself (see
-  // main.cpp "do NOT reserve reader buffers here"). Instead ReaderScene
-  // reserves it in onEnter() immediately after suspending BLE — the moment
-  // contiguous heap peaks — and releases it in onExit() before the radio
-  // comes back. init(true) borrows it whenever a fresh malloc fails.
+  // Shared dictionary — the one 32 KB back-reference window streaming
+  // inflate needs. It must be CONTIGUOUS, which the heap only has right
+  // after the radio suspends: ReaderScene claims it there (radio and reader
+  // take turns; a permanent BSS dict was tried and starved BLE+ANCS at boot,
+  // heapFree=3 KB). If the claim loses to fragmentation, zip reads fall to
+  // ZipFile's one-shot fallback: small container.xml/content.opf reads
+  // survive, oversized chapters fail as a retryable "Couldn't index".
   //
   // Single main-loop thread, so a plain in-use flag suffices; nested readers
   // fall back to malloc.
   static void setSharedDict(uint8_t* dict);
-  // Free the shared dict back to the heap. Callers: ReaderScene::onExit
-  // (radio takes its turn again) and File Transfer, which needs the RAM and
-  // ends its session in a reboot.
+  // Free the shared dict back to the heap (ReaderScene::onExit, File
+  // Transfer) — it must be gone before the radio stack reinitializes.
+  // Never frees a lent buffer (see lendDict).
   static void releaseSharedDict();
+  // CrossPoint-style framebuffer loan: point the shared dict at an external
+  // 32 KB+ buffer (the static BSS framebuffer) for the duration of one
+  // blocking work unit. A loan cannot fragment the heap and cannot be
+  // denied — the buffer never moves. No-op if a real heap dict is parked
+  // or a streaming inflate is mid-flight.
+  static void lendDict(uint8_t* buf);
+  // End the loan. Logs if a streaming reader outlived the lending scope
+  // (that would be a lifetime bug — the framebuffer is about to be redrawn).
+  static void returnDict();
   // True while a dict is parked — lets the owner avoid double-allocating.
   static bool hasSharedDict();
 

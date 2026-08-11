@@ -8,6 +8,7 @@
 
 #include <cstring>
 
+#include "../reader/ReadingStats.h"
 #include "../scenes/AppScenes.h"  // XPHONE_VERSION
 
 namespace {
@@ -48,6 +49,11 @@ bool FileTransferServer::begin() {
   _server->on("/api/files", HTTP_GET, [this] { handleFileList(); });
   _server->on("/download", HTTP_GET, [this] { handleDownload(); });
   _server->on("/delete", HTTP_POST, [this] { handleDelete(); });
+  _server->on("/stats", HTTP_GET, [this] {
+    // Reading stats snapshot (pages/minutes per day + per book). ~1 KB JSON,
+    // built from the resident store — no SD read on the request path.
+    _server->send(200, "application/json", reader::ReadingStats::toJson().c_str());
+  });
   _server->on(
       "/upload", HTTP_POST, [this] { handleUploadDone(); }, [this] { handleUploadData(); });
   // End-of-session from the phone. BLE is torn down for the whole Wi-Fi

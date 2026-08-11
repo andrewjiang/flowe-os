@@ -81,6 +81,7 @@ class ChapterHtmlSlimParser {
   bool resetCurrentTextBlock(const BlockStyle& blockStyle);
   void flushOversizedTextBlockIfNeeded();
   void flushPartWordBuffer();
+  void reservePageElements();
   void makePages();
   void emitHorizontalRule(const BlockStyle& blockStyle);
   // XML callbacks

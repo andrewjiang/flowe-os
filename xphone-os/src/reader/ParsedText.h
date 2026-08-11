@@ -19,7 +19,10 @@
 namespace reader {
 
 class ParsedText {
-  static constexpr size_t INITIAL_WORD_CAPACITY = 256;
+  // Must stay below MAX_WORDS_PER_TEXT_BLOCK (192): the parser flushes there,
+  // so capacity past the flush point is unreachable. Kept small so the init()
+  // reserve is a modest contiguous ask on a fragmented heap.
+  static constexpr size_t INITIAL_WORD_CAPACITY = 64;
   std::vector<std::string> words;
   std::vector<EpdFontFamily::Style> wordStyles;
   std::vector<bool> wordContinues;      // true = word attaches to previous with no break
@@ -27,6 +30,7 @@ class ParsedText {
   BlockStyle blockStyle;
   bool extraParagraphSpacing;
   bool isNaturalAlign;
+  bool layoutFailed;  // set when extractLine cannot allocate a TextBlock; checked by the parser after layout
 
   int resolveFirstLineIndent(bool isFirstLine, const TextMeasure& renderer, int fontId) const;
   std::vector<size_t> computeLineBreaks(const TextMeasure& renderer, int fontId, int pageWidth,
@@ -46,13 +50,14 @@ class ParsedText {
 
  public:
   explicit ParsedText(const bool extraParagraphSpacing, const BlockStyle& blockStyle = BlockStyle())
-      : blockStyle(blockStyle), extraParagraphSpacing(extraParagraphSpacing), isNaturalAlign(false) {
-    words.reserve(INITIAL_WORD_CAPACITY);
-    wordStyles.reserve(INITIAL_WORD_CAPACITY);
-    wordContinues.reserve(INITIAL_WORD_CAPACITY);
-    wordNoSpaceBefore.reserve(INITIAL_WORD_CAPACITY);
-  }
+      : blockStyle(blockStyle), extraParagraphSpacing(extraParagraphSpacing), isNaturalAlign(false), layoutFailed(false) {}
   ~ParsedText() = default;
+
+  // Reserves word storage. vector::reserve throws on OOM (-fno-exceptions →
+  // abort), so this pre-checks the largest free block and returns false when
+  // the heap is too tight; the caller must treat false as a parse failure.
+  bool init();
+  bool hasLayoutFailed() const { return layoutFailed; }
 
   void addWord(std::string word, EpdFontFamily::Style fontStyle, bool underline = false, bool attachToPrevious = false);
   void setBlockStyle(const BlockStyle& blockStyle) { this->blockStyle = blockStyle; }

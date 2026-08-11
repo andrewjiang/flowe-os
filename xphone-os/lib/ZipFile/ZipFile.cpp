@@ -3,6 +3,7 @@
 #include <HalStorage.h>
 #include <InflateReader.h>
 #include <Logging.h>
+#include <esp_heap_caps.h>
 
 #include <algorithm>
 
@@ -514,7 +515,20 @@ bool ZipFile::readFileToStream(const char* filename, Print& out, const size_t ch
       outputBuffer = static_cast<uint8_t*>(malloc(chunkSize));
     } else {
       oneShot = true;
-      outputBufferSize = inflatedDataSize;
+      // +1: uzlib stops as soon as dest hits dest_limit, so a stream whose
+      // output exactly fills inflatedDataSize returns Ok (buffer full), not
+      // Done — and one-shot mode cannot take a second readAtMost() call.
+      // One spare byte lets end-of-stream surface as Done in the same pass.
+      outputBufferSize = static_cast<size_t>(inflatedDataSize) + 1;
+      // One-shot needs the whole inflated file as a single contiguous block;
+      // when the heap cannot possibly provide it, refuse before malloc so
+      // Section's retry loop doesn't burn more attempts on the same ask.
+      const size_t largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+      if (outputBufferSize + 1024 > largestBlock) {
+        LOG_ERR("ZIP", "One-shot inflate needs %zu, largest block %zu - failing fast", outputBufferSize, largestBlock);
+        free(fileReadBuffer);
+        return false;
+      }
       outputBuffer = static_cast<uint8_t*>(malloc(outputBufferSize));
       if (outputBuffer && !ctx.reader.init(false)) {
         free(outputBuffer);
@@ -525,7 +539,7 @@ bool ZipFile::readFileToStream(const char* filename, Print& out, const size_t ch
       }
     }
     if (!outputBuffer) {
-      LOG_ERR("ZIP", "Failed to init inflate reader");
+      LOG_ERR("ZIP", "Failed to allocate %zu byte inflate output buffer", outputBufferSize);
       free(fileReadBuffer);
       return false;
     }

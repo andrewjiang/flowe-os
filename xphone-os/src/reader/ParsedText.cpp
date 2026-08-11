@@ -9,9 +9,11 @@
 #include "ParsedText.h"
 
 #include <Utf8.h>
+#include <esp_heap_caps.h>
 
 #include <algorithm>
 #include <limits>
+#include <new>
 
 namespace reader {
 
@@ -89,6 +91,22 @@ uint16_t measureWordWidth(const TextMeasure& renderer, const int fontId, const s
 
 }  // namespace
 
+bool ParsedText::init() {
+  // The word vector is the largest single ask; styles plus the two bit-vectors
+  // add a few hundred bytes. Demand 4 KB of headroom on top so this reserve is
+  // never the allocation that exhausts the heap mid-parse.
+  constexpr size_t reserveBytes = INITIAL_WORD_CAPACITY * (sizeof(std::string) + sizeof(EpdFontFamily::Style)) +
+                                  2 * (INITIAL_WORD_CAPACITY / 8);
+  if (heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) < reserveBytes + 4096) {
+    return false;
+  }
+  words.reserve(INITIAL_WORD_CAPACITY);
+  wordStyles.reserve(INITIAL_WORD_CAPACITY);
+  wordContinues.reserve(INITIAL_WORD_CAPACITY);
+  wordNoSpaceBefore.reserve(INITIAL_WORD_CAPACITY);
+  return true;
+}
+
 void ParsedText::addWord(std::string word, const EpdFontFamily::Style fontStyle, const bool underline,
                          const bool attachToPrevious) {
   if (word.empty()) return;
@@ -148,6 +166,9 @@ void ParsedText::layoutAndExtractLines(const TextMeasure& renderer, const int fo
   for (size_t i = 0; i < lineCount; ++i) {
     extractLine(i, pageWidth, wordWidths, wordContinues, wordNoSpaceBefore, lineBreakIndices, processLine, renderer,
                 fontId);
+    if (layoutFailed) {
+      return;  // OOM in extractLine — stop allocating; the parse is already lost
+    }
   }
 
   // Remove consumed words so size() reflects only remaining words
@@ -454,8 +475,13 @@ void ParsedText::extractLine(const size_t breakIndex, const int pageWidth, const
     }
   }
 
-  processLine(std::make_shared<TextBlock>(std::move(lineWords), std::move(lineXPos), std::move(lineWordStyles),
-                                          blockStyle));
+  auto lineBlock = std::shared_ptr<TextBlock>(
+      new (std::nothrow) TextBlock(std::move(lineWords), std::move(lineXPos), std::move(lineWordStyles), blockStyle));
+  if (!lineBlock) {
+    layoutFailed = true;  // line dropped; parser checks hasLayoutFailed() and fails the parse
+    return;
+  }
+  processLine(std::move(lineBlock));
 }
 
 }  // namespace reader

@@ -1,5 +1,7 @@
 #include "ReaderScene.h"
 
+#include "../CpuBoost.h"
+
 // xphone-os Reader R2a — scene over the CrossPoint engine port (src/reader).
 //
 // Flow:
@@ -54,6 +56,7 @@
 #include "../Fonts.h"
 #include "../ble/CompanionBleService.h"
 #include "../reader/CoverThumb.h"
+#include "../reader/ReadingStats.h"
 #include "../reader/Epub.h"
 #include "../reader/Page.h"
 #include "../reader/ProgressFile.h"
@@ -87,13 +90,18 @@ constexpr int kListMarginX = 20;
 constexpr int kHeaderH = 46;
 constexpr int kGridCols = 2;
 constexpr int kGridRows = 2;
+// Concept A stats band (docs/plans/2026-07-29-reading-stats-design.md):
+// one compact line — streak + pages-today inline, Mon–Sun week bars right —
+// between the header and the shelf. 56px: the 260px thumb bitmaps are fixed,
+// so every band pixel comes out of tile text room (84px overlapped, live X4).
+constexpr int kStatsBandH = 56;
 constexpr int kThumbW = 200;      // cover thumb target box (aspect-fit inside)
 constexpr int kThumbH = 260;
 constexpr int kSelInset = 6;      // selection border inset from the tile edge
 constexpr int kSelRadius = 10;
 constexpr int kSelThick = 3;
-constexpr int kThumbTop = 12;     // tile top -> thumb box
-constexpr int kTitleGap = 8;      // thumb box bottom -> title line
+constexpr int kThumbTop = 8;      // tile top -> thumb box (tightened for the stats band)
+constexpr int kTitleGap = 6;      // thumb box bottom -> title line
 constexpr int kTileTextPad = 14;  // horizontal padding for tile text
 
 bool endsWithEpubCI(const char* name) {
@@ -154,46 +162,15 @@ ReaderScene::ReaderScene() = default;   // Epub/Section/TextMeasure complete her
 ReaderScene::~ReaderScene() = default;
 
 void ReaderScene::onEnter() {
-  // Radio and reader take turns (no PSRAM on the X3): with BLE+ANCS resident
-  // there isn't enough contiguous heap for the 32 KB inflate window + expat
-  // + pagination, so first-time chapter indexing fails. Suspend BLE while
-  // reading; onExit resumes it and the phone reconnects automatically.
-  COMPANION_BLE.suspendForReader();
-
-  // Claim the 32 KB inflate window NOW, while the heap is at its cleanest.
-  // Suspending BLE hands back tens of KB, but nothing defragments it later:
-  // by the time a chapter is indexed, cover decoding and section buffers have
-  // chopped the heap up and a fresh contiguous 32 KB malloc can fail. When it
-  // does, ZipFile's one-shot fallback tries to inflate the WHOLE entry into
-  // one buffer, which is fine for container.xml but hopeless for a big
-  // chapter — that was "Couldn't index this chapter" on exactly the books
-  // with the largest chapters. Reserving once here makes it deterministic.
-  // Released in onExit() before the radio comes back (main.cpp explains why
-  // this must NOT be parked at boot instead).
-  // Cover scratch FIRST, inflate window second. The largest post-suspend free
-  // region (~68 KB on the C3) fits the PNG-union scratch (~58 KB) OR the 32 KB
-  // dict, not both; claimed dict-first, the region's remainder (34804 bytes,
-  // live X4) can never host the scratch and PNG covers are unrenderable. So the
-  // scratch takes the big region and the dict tries the next-largest hole — and
-  // if THAT fails, the scratch is released and the dict retried, because a
-  // reserved dict is the stronger guarantee (chapter indexing) and cover-less
-  // tiles are the acceptable degradation.
-  reader::CoverThumb::preacquireScratch();
-  if (!InflateReader::hasSharedDict()) {
-    auto* dict = static_cast<uint8_t*>(malloc(InflateReader::kDictSize));
-    if (!dict) {
-      reader::CoverThumb::releaseScratch();
-      dict = static_cast<uint8_t*>(malloc(InflateReader::kDictSize));
-      Serial.printf("[xphone-os] reader: dict displaced cover scratch (%s)\n",
-                    dict ? "ok" : "STILL FAILED");
-    }
-    if (dict) {
-      InflateReader::setSharedDict(dict);
-    }
-    Serial.printf("[xphone-os] reader: inflate window reserve %s (free=%u largest=%u)\n",
-                  dict ? "ok" : "FAILED", ESP.getFreeHeap(),
-                  static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
-  }
+  // Radio and reader take turns for the WHOLE scene — grid included. The
+  // BLE-connected-shelf experiment died on live X3 numbers: with the static
+  // 32 KB dict resident, full BLE+ANCS bring-up beside even a torn-down
+  // Reader left 1,352 B free (min 448) — every connection-time malloc
+  // failed, iOS hung at "discovering services", reconnect churn fragmented
+  // the rest. The stack barely fits at boot (~6 KB margin); it cannot share
+  // the scene with anything. Phone sync happens from home and every
+  // non-Reader scene, one Back press away.
+  suspendRadioForBookWork();
 
   _work = Work::None;
   _workArmed = false;
@@ -236,7 +213,33 @@ void ReaderScene::onEnter() {
   }
 }
 
+void ReaderScene::suspendRadioForBookWork() {
+  // Radio and reader take turns (no PSRAM on the X3): with BLE+ANCS resident
+  // there isn't enough heap for expat + pagination + the cover scratch.
+  // Called from onEnter (idempotent belt at workOpenBook); onExit resumes
+  // the radio and the phone reconnects automatically.
+  if (_radioSuspended) return;
+  _radioSuspended = true;
+  COMPANION_BLE.suspendForReader();
+
+  // DICT FIRST, cover scratch second — reading beats covers. Claimed at the
+  // cleanest post-suspend heap; freed in onExit before the radio returns.
+  // Probe-verified on X3: fresh boots claim fine (largest 59-102 KB free
+  // here); heavy BLE churn within one power-on can fragment below 32 KB,
+  // in which case streaming inflate falls to the repaired one-shot path:
+  // small/medium entries read, oversized chapters fail as a retryable
+  // "Couldn't index" until a restart. STORED-repacked uploads (book-
+  // management design doc) remove the window dependency entirely.
+  // No heap dict claim anymore: the 32 KB inflate window is LENT from the
+  // static framebuffer inside runWork() (see there). The suspend-time malloc
+  // was a fragmentation dice-roll — it lost by 12 bytes to allocator crumbs
+  // after BLE churn (FRAGMAP 2026-08-06); the loan cannot lose. Reading also
+  // gains the 32 KB the parked dict used to hold.
+  reader::CoverThumb::preacquireScratch();
+}
+
 void ReaderScene::onExit() {
+  reader::ReadingStats::sessionEnd();  // covers home/sleep exits mid-book
   // CrossPoint activity model: hold nothing while another scene is up.
   // Reopening from book.bin + progress.bin in onEnter is fast.
   _section.reset();
@@ -248,7 +251,10 @@ void ReaderScene::onExit() {
   _work = Work::None;
   _workArmed = false;
 
-  COMPANION_BLE.resumeAfterReader();
+  if (_radioSuspended) {
+    _radioSuspended = false;
+    COMPANION_BLE.resumeAfterReader();
+  }
 }
 
 // --- Soft keys -----------------------------------------------------------------
@@ -276,6 +282,19 @@ const char* const* ReaderScene::softKeys() const {
 // --- Deferred blocking work ----------------------------------------------------
 
 void ReaderScene::runWork() {
+  // 160 MHz exactly for the blocking work below (indexing dominates at ~51 ms
+  // per page on the 80 MHz park); re-parks on every exit path via the guard.
+  // Radio is already suspended scene-wide, so there is no BLE coexistence to
+  // weigh — and the panel/SPI paths run at 160 on every boot before Stage 6.
+  CpuBoost boost;
+  // CrossPoint-style framebuffer loan (upstream #2563): the static BSS
+  // framebuffer (52,272 B X3 / 48,000 B X4) doubles as the 32 KB inflate
+  // window for the duration of this work unit. Safe because the caller
+  // guarantees the flush worker is idle (frame already on glass, panel
+  // retains it) and render() recomposes the framebuffer from scratch after
+  // every work unit. A loan cannot fragment the heap and cannot be denied —
+  // the whole 12-bytes-short fragmentation class ends here.
+  if (_fbForLoan) InflateReader::lendDict(_fbForLoan);
   const Work w = _work;
   _work = Work::None;
   _workArmed = false;
@@ -295,6 +314,7 @@ void ReaderScene::runWork() {
     case Work::None:
       break;
   }
+  InflateReader::returnDict();  // loan ends before the next render scribbles
 }
 
 void ReaderScene::failWith(const char* msg) {
@@ -310,6 +330,7 @@ void ReaderScene::failWith(const char* msg) {
 }
 
 void ReaderScene::workOpenBook() {
+  suspendRadioForBookWork();  // opening always needs the dict + a quiet heap
   // Leaving the grid: hand the ~58KB cover-decoder scratch back to the heap so
   // chapter indexing (32KB inflate + expat + line breaking) has full headroom.
   reader::CoverThumb::releaseScratch();
@@ -366,6 +387,7 @@ void ReaderScene::workBuildSection() {
                 _section->pageCount, static_cast<unsigned long>(millis() - t0), ESP.getFreeHeap());
   applyPendingPage();
   _state = State::Reading;
+  reader::ReadingStats::sessionStart(_bookPath);
   markDirty();
 }
 
@@ -447,6 +469,7 @@ void ReaderScene::ensureSectionOrIndex() {
   if (_section->loadSectionFile(_settings)) {
     applyPendingPage();
     _state = State::Reading;
+    reader::ReadingStats::sessionStart(_bookPath);
   } else {
     // Cache missing (or stale — loadSectionFile cleared it): show the
     // Indexing frame first, build on the next idle tick.
@@ -591,6 +614,7 @@ void ReaderScene::handleInput(Input& in) {
 
 void ReaderScene::pageTurn(const bool forward) {
   if (!_epub || !_section) return;
+  reader::ReadingStats::pageTurn();
   if (forward) {
     if (_section->currentPage + 1 < static_cast<int>(_section->pageCount)) {
       _section->currentPage++;
@@ -648,6 +672,8 @@ void ReaderScene::cycleFontSize() {
 // --- Book list -------------------------------------------------------------------
 
 void ReaderScene::enterBookList() {
+  reader::ReadingStats::sessionEnd();  // flush before the grid repaints (band shows fresh numbers)
+
   scanBooks();
   _state = State::BookList;
   markDirty();
@@ -754,16 +780,19 @@ void ReaderScene::openSelectedBook() {
 
 XpRect ReaderScene::listRect() const {
   if (_hCache <= 0) return XpRect{};  // no layout yet -> full-panel fallback
-  return XpRect{0, kHeaderH, _wCache, static_cast<int16_t>(_hCache - kHeaderH - Scene::SOFTKEY_BAR_H)};
+  return XpRect{0, kHeaderH + kStatsBandH, _wCache,
+                static_cast<int16_t>(_hCache - kHeaderH - kStatsBandH - Scene::SOFTKEY_BAR_H)};
 }
 
 XpRect ReaderScene::tileRect(const int visibleIndex) const {
   if (_hCache <= 0 || visibleIndex < 0) return XpRect{};
   const int16_t tileW = static_cast<int16_t>(_wCache / kGridCols);
-  const int16_t tileH = static_cast<int16_t>((_hCache - kHeaderH - Scene::SOFTKEY_BAR_H) / kGridRows);
+  const int16_t tileH = static_cast<int16_t>(
+      (_hCache - kHeaderH - kStatsBandH - Scene::SOFTKEY_BAR_H) / kGridRows);
   const int col = visibleIndex % kGridCols;
   const int row = visibleIndex / kGridCols;
-  return XpRect{static_cast<int16_t>(col * tileW), static_cast<int16_t>(kHeaderH + row * tileH), tileW, tileH};
+  return XpRect{static_cast<int16_t>(col * tileW),
+                static_cast<int16_t>(kHeaderH + kStatsBandH + row * tileH), tileW, tileH};
 }
 
 void ReaderScene::moveSelection(const int delta) {
@@ -792,6 +821,7 @@ void ReaderScene::moveSelection(const int delta) {
 // --- Render ---------------------------------------------------------------------
 
 void ReaderScene::render(Gfx& gfx) {
+  _fbForLoan = gfx.display().getFrameBuffer();  // for runWork()'s dict loan
   _wCache = static_cast<int16_t>(gfx.width());
   _hCache = static_cast<int16_t>(gfx.height());
   // Text viewport from the actual panel (resolution-agnostic; part of the
@@ -861,6 +891,7 @@ void ReaderScene::renderReading(Gfx& gfx) {
   {
     // CrossPoint replay model: the Page lives ONLY inside this render — it is
     // deserialized, composed into the framebuffer, and freed at scope exit.
+    CpuBoost boost;  // page compose is pure CPU; ~halves at 160 MHz
     auto page = _section->loadPageFromSectionFile();
     if (!page) {
       if (_pageLoadRetries++ < 1) {
@@ -940,6 +971,67 @@ void ReaderScene::renderBookList(Gfx& gfx) {
   }
   gfx.fillRect(0, kHeaderH - 2, w, 2, true);
 
+  // ── Stats band (concept A, compact): "N DAY STREAK   N PAGES TODAY"
+  // inline on one baseline, THIS calendar week Mon–Sun as bars on the right
+  // (trailing-7 ordering read as alphabet soup — "TWTFSSM" — on hardware).
+  {
+    const reader::ReadingStats::Band sb = reader::ReadingStats::band();
+    const int bandY = kHeaderH;
+    const int numY = bandY + 10;
+    const int capNudge = gfx.lineHeight(kFontBold) - gfx.lineHeight(kFontSmall);
+    char num[16];
+
+    if (!sb.clockValid) {
+      // No phone time since boot: totals still count, days can't. Say so
+      // instead of drawing dash numerals and a meaningless week.
+      gfx.drawText(kFontSmall, kListMarginX, numY + capNudge, "Sync iPhone to track streaks");
+    } else {
+      int x = kListMarginX;
+      snprintf(num, sizeof(num), "%u", sb.streakDays);
+      gfx.drawText(kFontBold, x, numY, num);
+      x += gfx.textWidth(kFontBold, num) + 6;
+      gfx.drawText(kFontSmall, x, numY + capNudge, "DAY STREAK");
+      x += gfx.textWidth(kFontSmall, "DAY STREAK") + 24;
+      snprintf(num, sizeof(num), "%u", sb.todayPages);
+      gfx.drawText(kFontBold, x, numY, num);
+      x += gfx.textWidth(kFontBold, num) + 6;
+      gfx.drawText(kFontSmall, x, numY + capNudge, "PAGES TODAY");
+
+      // Mon..Sun of the current week; future days render as hairline stubs.
+      // One type weight for all seven letters, centered under their bars:
+      // the old 13 px pitch let adjacent W/M glyphs touch, and the faux-bold
+      // today letter outgrew its cell and overlapped. Today is marked with a
+      // 2 px underline instead — emphasis that cannot change glyph metrics.
+      const int barW = 9, barGap = 8, barMaxH = 26;
+      const int blockW = 7 * barW + 6 * barGap;
+      const int barX0 = w - kListMarginX - blockW;
+      const int barBase = bandY + 4 + barMaxH;
+      uint16_t maxPages = 1;
+      for (int i = 0; i < 7; i++) {
+        if (sb.weekPages[i] > maxPages) maxPages = sb.weekPages[i];
+      }
+      static const char* kDow = "MTWTFSS";
+      for (int slot = 0; slot < 7; slot++) {
+        const int bx = barX0 + slot * (barW + barGap);
+        const int daysBack = static_cast<int>(sb.todayWeekday) - slot;
+        int h = 1;  // future days & zero days: hairline stub
+        if (daysBack >= 0) {
+          const uint16_t p = sb.weekPages[6 - daysBack];
+          if (p) h = 2 + (barMaxH - 2) * p / maxPages;
+        }
+        gfx.fillRect(bx, barBase - h, barW, h, true);
+        const char letter[2] = {kDow[slot], 0};
+        const int lw = gfx.textWidth(kFontSmall, letter);
+        gfx.drawText(kFontSmall, bx + (barW - lw) / 2, barBase + 3, letter);
+        if (slot == sb.todayWeekday) {
+          gfx.fillRect(bx, barBase + 3 + gfx.lineHeight(kFontSmall) + 1, barW, 2, true);
+        }
+      }
+    }
+
+    gfx.fillRect(0, kHeaderH + kStatsBandH - 2, w, 2, true);
+  }
+
   if (_bookCount == 0) {
     gfx.drawTextCentered(kFontBold, w / 2, gfx.height() / 2 - gfx.lineHeight(kFontBold), "No books found");
     gfx.drawTextCentered(kFontRegular, w / 2, gfx.height() / 2 + 6, "Put .epub files in /books on the SD card");
@@ -962,14 +1054,17 @@ void ReaderScene::renderTile(Gfx& gfx, const int visibleIndex) {
   const BookEntry& b = _books[idx];
   const XpRect r = tileRect(visibleIndex);
 
-  // Selection: rounded border around the tile, inset (LauncherScene idiom).
-  if (idx == _sel) {
-    gfx.drawRoundedRect(r.x + kSelInset, r.y + kSelInset, r.w - 2 * kSelInset, r.h - 2 * kSelInset, kSelRadius,
-                        kSelThick, true);
-  }
-
   const int cx = r.x + r.w / 2;
   const int thumbTop = r.y + kThumbTop;
+
+  // Selection: rounded border around the COVER BOX, not the whole tile — the
+  // stats band ate the tile's bottom slack, and a full-tile border sliced
+  // through the author line on hardware.
+  if (idx == _sel) {
+    gfx.drawRoundedRect(cx - kThumbW / 2 - kSelInset - kSelThick, thumbTop - kSelInset - kSelThick,
+                        kThumbW + 2 * (kSelInset + kSelThick), kThumbH + 2 * (kSelInset + kSelThick),
+                        kSelRadius, kSelThick, true);
+  }
   bool drewThumb = false;
   if (b.meta == TileMeta::Cover) {
     // Center the aspect-fit thumb (dims cached at grid-work time) in the box.
