@@ -1,8 +1,10 @@
 #include "FileTransferServer.h"
 
 #include <ArduinoJson.h>
+#include <BoardConfig.h>
 #include <SDCardManager.h>
 #include <WiFi.h>
+#include <esp_heap_caps.h>
 #include <esp_system.h>
 #include <esp_task_wdt.h>
 
@@ -53,6 +55,22 @@ bool FileTransferServer::begin() {
     // Reading stats snapshot (pages/minutes per day + per book). ~1 KB JSON,
     // built from the resident store — no SD read on the request path.
     _server->send(200, "application/json", reader::ReadingStats::toJson().c_str());
+  });
+  _server->on("/health", HTTP_GET, [this] {
+    // Device memory health for support reports (same numbers as the 60 s
+    // serial stats line, reachable without a serial cable). BLE is always
+    // down during a transfer session, so there is no "mode" field here.
+    const uint32_t heapFree = ESP.getFreeHeap();
+    const uint32_t largest = static_cast<uint32_t>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+    const unsigned fragPct = heapFree ? static_cast<unsigned>(100u - (largest * 100u) / heapFree) : 0;
+    char json[224];
+    snprintf(json, sizeof(json),
+             "{\"version\":\"%s\",\"device\":\"%s\",\"uptimeMs\":%lu,"
+             "\"heapFree\":%lu,\"heapMinFree\":%lu,\"largestBlock\":%lu,\"fragPct\":%u}",
+             XPHONE_VERSION, BoardConfig::ACTIVE.name, static_cast<unsigned long>(millis()),
+             static_cast<unsigned long>(heapFree), static_cast<unsigned long>(esp_get_minimum_free_heap_size()),
+             static_cast<unsigned long>(largest), fragPct);
+    _server->send(200, "application/json", json);
   });
   _server->on(
       "/upload", HTTP_POST, [this] { handleUploadDone(); }, [this] { handleUploadData(); });
@@ -133,11 +151,10 @@ void FileTransferServer::handleRoot() {
 void FileTransferServer::handleStatus() {
   _requestCount++;
   JsonDocument doc;
-#if FREEINK_DEVICE_X4
-  doc["device"] = "X4";
-#else
-  doc["device"] = "X3";
-#endif
+  {
+    extern bool gDeviceIsX3;  // DeviceKind.h; set at boot
+    doc["device"] = gDeviceIsX3 ? "X3" : "X4";
+  }
   doc["version"] = XPHONE_VERSION;
   doc["mode"] = "STA";
   doc["ip"] = WiFi.localIP().toString();
@@ -219,13 +236,17 @@ void FileTransferServer::handleDownload() {
   _server->sendHeader("Content-Disposition", disposition);
   _server->send(200, hasEpubExtension(path) ? "application/epub+zip" : "application/octet-stream", "");
 
-  // 4 KB stack buffer streaming, CrossPoint handleDownload pattern
-  // (x4-os CrossPointWebServer.cpp:548-569).
+  // 4 KB chunked streaming, CrossPoint handleDownload pattern
+  // (x4-os CrossPointWebServer.cpp:548-569). Reuses the upload batch buffer:
+  // the HTTP server is synchronous single-client, so an upload body and a
+  // download stream can never be in flight together — a second static 4 KB
+  // here was pure BSS duplication.
   NetworkClient client = _server->client();
-  static uint8_t buffer[4096];  // static: keeps the loop-task stack small
+  uint8_t* const buffer = _upload.buffer;
+  constexpr size_t kBufSize = UploadState::kBufferSize;
   bool ok = true;
   while (ok && file.available()) {
-    const int result = file.read(buffer, sizeof(buffer));
+    const int result = file.read(buffer, kBufSize);
     if (result <= 0) break;
     size_t sent = 0;
     while (sent < static_cast<size_t>(result)) {

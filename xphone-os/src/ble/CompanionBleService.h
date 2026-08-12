@@ -31,6 +31,7 @@
 
 class BLEAdvertising;
 class BLECharacteristic;
+class BLEService;
 class BLECharacteristicCallbacks;
 class BLEServer;
 class BLEServerCallbacks;
@@ -67,16 +68,9 @@ class CompanionBleService final {
   bool isConnected() const;
   uint32_t getRevision() const;
   std::string getStatusMessage() const;
-  CompanionCardState getCard() const;
-  // M4.2 Block scene — dedicated cache of the LAST parsed "block-status" card,
-  // kept intact regardless of later priorities/today cards clobbering the
-  // single generic `card` slot (priorities/today snapshot cards land in the same
-  // slot, so getCard() no longer reliably holds the block card by the time
-  // BlockScene renders). Mutex-guarded copy, same cost/pattern as getCard(); the counter
-  // bumps only when a block-status card lands, so BlockScene can drive its
-  // fresh-card detection off block traffic alone.
-  CompanionCardState getBlockCard() const;
-  uint32_t getBlockCardRevision() const;
+  // NOTE deliberately no getCard()/getBlockCard(): scenes render from the
+  // bounded fixed stores (BLOCK_STATUS/TODAY_STORE/...), never by copying the
+  // 3.6 KB parse slot. `card` below is the parse/assembly scratch only.
 
   // Last Today / Priorities card JSON (raw payload), stashed so Sleep can persist
   // them to NVS and re-seed the stores on wake — skipping the blank "Syncing"
@@ -176,13 +170,12 @@ class CompanionBleService final {
   bool connected = false;
   uint32_t revision = 0;
   uint32_t actionSequence = 0;
+  // Parse/assembly scratch: incoming cards land here (multi-part snapshots
+  // accumulate across parts), the fixed stores capture what scenes render,
+  // and releaseReaderTransients() frees its string heap at reader suspend.
   CompanionCardState card;
-  // M4.2 — full copy of the last "block-status" card + its own revision, so
-  // BlockScene reads durable block state instead of the clobbered `card` slot.
-  CompanionCardState blockCard;
   std::string lastTodayCardJson;       // raw JSON of the last today.snapshot card
   std::string lastWorkoutCardJson;     // raw JSON of the last workout.snapshot card
-  uint32_t blockCardRevision = 0;
   std::string statusMessage = "Not advertising";
   char peerAddress[18] = {0};
 
@@ -217,10 +210,14 @@ class CompanionBleService final {
   mutable SemaphoreHandle_t stateMutex = nullptr;
 
   BLEServer* server = nullptr;
+  // Kept ONLY so shutdownRadio can free them after BLEDevice::deinit:
+  // upstream BLEServer has no destructor, so deinit deletes the server but
+  // orphans the service/characteristic objects each begin() creates —
+  // measured 1.76 KB leaked per reader BLE cycle (X4 bench, 2026-08-11).
+  BLEService* gattService = nullptr;
+  BLECharacteristic* cardCharacteristic = nullptr;
   BLEAdvertising* advertising = nullptr;
   BLECharacteristic* actionCharacteristic = nullptr;
-  BLEServerCallbacks* serverCallbacks = nullptr;
-  BLECharacteristicCallbacks* cardWriteCallbacks = nullptr;
 
   void ensureMutex() const;
   void applyAdvIntervals(AdvMode mode);  // writes m_advParams only; applied at next start()

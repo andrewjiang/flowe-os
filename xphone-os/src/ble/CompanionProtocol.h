@@ -1,5 +1,7 @@
 #pragma once
 
+#include "../DeviceKind.h"
+
 // xphone-os M2 — companion GATT protocol, copied from x4-os
 // src/companion/CompanionProtocol.h so the existing iOS companion app
 // connects unchanged (same service/characteristic UUIDs, same card/command
@@ -18,13 +20,9 @@ namespace CompanionProtocol {
 // the same iPhone scan list. The iOS app discovers/reconnects by SERVICE_UUID
 // (BluetoothManager.swift:101 scanForPeripherals(withServices:)), not by
 // name, so only the human-visible label changes — SERVICE_UUID must never.
-#if defined(FREEINK_DEVICE_X4)
-constexpr const char* DEVICE_NAME = "xphone X4";
-#elif defined(FREEINK_DEVICE_X3)
-constexpr const char* DEVICE_NAME = "xphone X3";
-#else
-constexpr const char* DEVICE_NAME = "xphone";
-#endif
+// Runtime: one universal binary serves both devices (DeviceKind.h, set at
+// boot by the I2C fingerprint). BLE init happens well after detection.
+inline const char* deviceName() { return ::gDeviceIsX3 ? "xphone X3" : "xphone X4"; }
 constexpr const char* SERVICE_UUID = "6E400001-B5A3-F393-E0A9-E50E24DCCA9E";
 constexpr const char* CARD_WRITE_UUID = "6E400002-B5A3-F393-E0A9-E50E24DCCA9E";
 constexpr const char* ACTION_NOTIFY_UUID = "6E400003-B5A3-F393-E0A9-E50E24DCCA9E";

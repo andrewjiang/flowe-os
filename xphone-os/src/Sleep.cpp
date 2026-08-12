@@ -1,6 +1,8 @@
 #include "Sleep.h"
 
 #include <Arduino.h>
+
+#include "DeviceKind.h"
 #include <BoardConfig.h>
 #include <EInkDisplay.h>
 #include <InputManager.h>
@@ -68,6 +70,15 @@ constexpr const char* kNotifStoreKey = "notifStore";
 constexpr const char* kNotifTombKey = "notifTombs";
 constexpr std::size_t kNotifPersistMax = 10;  // about 2.2 KB with the current Entry layout
 
+// ONE shared persistence scratch pair for both the sleep-time snapshot and
+// the boot-time restore. The two paths can never run concurrently (both are
+// main-loop only: one entering deep sleep, the other inside boot()), so the
+// four per-site static blobs this replaces were pure BSS duplication
+// (~2.7 KB). Static rather than stack because sleepNow() runs deep in the
+// loop task's stack.
+uint8_t gNotifScratch[kNotifPersistMax * sizeof(NotificationStore::Entry)];
+uint8_t gTombScratch[NotificationStore::TOMBSTONE_CAPACITY * sizeof(NotificationStore::Tombstone)];
+
 // ---------------------------------------------------------------------------
 // Sleep screen. FULL refresh — the panel then holds this image at ~0 current
 // (e-ink retains unpowered; UC8253 DEEP_SLEEP 0x07, SSD1677 DEEP_SLEEP 0x10).
@@ -130,7 +141,8 @@ void drawSleepScreen(Gfx& gfx) {
 // path (minimal I2C, no SDK link — x4-os is read-only reference). Registers/
 // addresses: HalTiltSensor.h:44-64, HalGPIO.h:35-39.
 // ---------------------------------------------------------------------------
-#if FREEINK_DEVICE_X3 && !FREEINK_DEVICE_X4
+// Compiled unconditionally for the universal binary; only CALLED on an X3
+// (gDeviceIsX3) — the X4 profile's gauge pins don't carry this bus.
 constexpr uint8_t kImuAddr = 0x6B;     // I2C_ADDR_QMI8658
 constexpr uint8_t kImuAddrAlt = 0x6A;  // I2C_ADDR_QMI8658_ALT
 constexpr uint8_t kImuWhoAmIReg = 0x00;
@@ -179,8 +191,6 @@ void imuSleep() {
     Serial.println("[xphone-os] sleep: QMI8658 register write failed");
   }
 }
-#endif  // FREEINK_DEVICE_X3 && !FREEINK_DEVICE_X4
-
 }  // namespace
 
 namespace Sleep {
@@ -279,20 +289,16 @@ void sleepNow(Gfx& gfx, Input& input) {
         prefs.putString(kWorkoutCardKey, out);
       }
 
-      // Newest notifications (static buffer: sleepNow runs deep in the loop
-      // task's stack, keep the 2.2 KB blob off it).
+      // Newest notifications (shared persistence scratch, declared above).
       {
-        static uint8_t notifBlob[kNotifPersistMax * sizeof(NotificationStore::Entry)];
-        const std::size_t n = NOTIFICATION_STORE.snapshot(notifBlob, sizeof(notifBlob));
-        if (n > 0) prefs.putBytes(kNotifStoreKey, notifBlob, n);
+        const std::size_t n = NOTIFICATION_STORE.snapshot(gNotifScratch, sizeof(gNotifScratch));
+        if (n > 0) prefs.putBytes(kNotifStoreKey, gNotifScratch, n);
         else prefs.remove(kNotifStoreKey);  // do not resurrect a list cleared since the last sleep
 
         // Individual-clear tombstones are a separate raw blob so changing the
         // notification snapshot policy cannot discard the replay retry memory.
-        static uint8_t tombBlob[NotificationStore::TOMBSTONE_CAPACITY *
-                                sizeof(NotificationStore::Tombstone)];
-        const std::size_t tombN = NOTIFICATION_STORE.tombstoneSnapshot(tombBlob, sizeof(tombBlob));
-        if (tombN > 0) prefs.putBytes(kNotifTombKey, tombBlob, tombN);
+        const std::size_t tombN = NOTIFICATION_STORE.tombstoneSnapshot(gTombScratch, sizeof(gTombScratch));
+        if (tombN > 0) prefs.putBytes(kNotifTombKey, gTombScratch, tombN);
         else prefs.remove(kNotifTombKey);
       }
       prefs.end();
@@ -357,9 +363,7 @@ void sleepNow(Gfx& gfx, Input& input) {
   }
 
   // 3. IMU (X3 only): make sure the QMI8658's internal oscillator is off.
-#if FREEINK_DEVICE_X3 && !FREEINK_DEVICE_X4
-  imuSleep();
-#endif
+  if (::gDeviceIsX3) imuSleep();
 
   // 4. Panel controller into deep sleep, holding the sleep screen — the only
   //    panel deepSleep() in the OS under the M4 two-state power model (x4-os
@@ -465,10 +469,9 @@ void seedPersistedBlock() {
   // Last-known notifications: instant list on wake; the ANCS backfill then
   // refreshes/dedupes into it (NotificationStore::restore contract).
   if (prefs.isKey(kNotifStoreKey)) {
-    static uint8_t notifBlob[kNotifPersistMax * sizeof(NotificationStore::Entry)];
-    const std::size_t n = prefs.getBytes(kNotifStoreKey, notifBlob, sizeof(notifBlob));
+    const std::size_t n = prefs.getBytes(kNotifStoreKey, gNotifScratch, sizeof(gNotifScratch));
     if (n >= sizeof(NotificationStore::Entry) && n % sizeof(NotificationStore::Entry) == 0) {
-      NOTIFICATION_STORE.restore(notifBlob, n);
+      NOTIFICATION_STORE.restore(gNotifScratch, n);
       Serial.printf("[xphone-os] boot: seeded %u persisted notification(s)\n",
                     static_cast<unsigned>(n / sizeof(NotificationStore::Entry)));
     } else if (n > 0) {
@@ -481,11 +484,9 @@ void seedPersistedBlock() {
   // replay. Their raw format is independently size-validated for clean firmware
   // upgrades, exactly like Entry above.
   if (prefs.isKey(kNotifTombKey)) {
-    static uint8_t tombBlob[NotificationStore::TOMBSTONE_CAPACITY *
-                            sizeof(NotificationStore::Tombstone)];
-    const std::size_t n = prefs.getBytes(kNotifTombKey, tombBlob, sizeof(tombBlob));
+    const std::size_t n = prefs.getBytes(kNotifTombKey, gTombScratch, sizeof(gTombScratch));
     if (n >= sizeof(NotificationStore::Tombstone) && n % sizeof(NotificationStore::Tombstone) == 0) {
-      NOTIFICATION_STORE.restoreTombstones(tombBlob, n);
+      NOTIFICATION_STORE.restoreTombstones(gTombScratch, n);
       Serial.printf("[xphone-os] boot: seeded %u notification tombstone(s)\n",
                     static_cast<unsigned>(n / sizeof(NotificationStore::Tombstone)));
     }

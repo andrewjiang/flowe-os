@@ -31,6 +31,12 @@ class BlockStatusStore {
   struct Status {
     bool active = false;            // block running (state active/break or heuristics)
     bool onBreak = false;          // block paused on a break
+    // Provenance: true = a live block-status card from the phone; false = the
+    // boot/wake NVS seed. BlockScene needs the distinction — a seed has no
+    // elapsed-time info (no RTC), so it must render the absolute end label,
+    // never a countdown, and must lose to any real card.
+    bool fromCard = false;
+    bool ready = false;            // card state == "ready" (preset view); seeds never set it
     int remainingMinutes = 0;      // countdown minutes the phone reported
     int durationMinutes = 0;       // total block minutes the phone reported
     char preset[24] = {0};         // preset title ("Deep Work"), "" when omitted

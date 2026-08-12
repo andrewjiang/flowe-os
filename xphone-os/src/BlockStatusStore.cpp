@@ -42,6 +42,8 @@ void BlockStatusStore::updateFromCard(const CompanionCardState& card) {
 
   _status.active = active;
   _status.onBreak = onBreak;
+  _status.fromCard = true;
+  _status.ready = (card.state == "ready");
   _status.remainingMinutes = remaining;
   _status.durationMinutes = card.durationMinutes;
   // snprintf clips + always null-terminates (strncpy does not).
@@ -66,6 +68,8 @@ void BlockStatusStore::seedFromPersisted(bool active, bool onBreak, int remainin
                                          const char* preset, const char* endsAtLabel) {
   _status.active = active;
   _status.onBreak = onBreak;
+  _status.fromCard = false;  // a seed is not a card: no countdown, loses to real cards
+  _status.ready = false;
   _status.remainingMinutes = remainingMinutes;
   _status.durationMinutes = durationMinutes;
   snprintf(_status.preset, sizeof(_status.preset), "%s", preset ? preset : "");

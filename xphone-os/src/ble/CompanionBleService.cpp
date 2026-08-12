@@ -184,53 +184,53 @@ void CompanionBleService::begin() {
   if (started) return;
 
   LOG_INF("X4CMP", "Starting BLE companion service");
-  BLEDevice::init(CompanionProtocol::DEVICE_NAME);
+  BLEDevice::init(CompanionProtocol::deviceName());
   BLEDevice::setMTU(517);
 
   // Bonding + Secure Connections, no MITM/IO — same security config as
   // x4-os CompanionBleService.cpp:146-151; ANCS requires a bonded link.
-  BLESecurity* security = new (std::nothrow) BLESecurity();
-  if (!security) {
-    LOG_ERR("X4CMP", "OOM: BLESecurity");
-    return;
-  }
-  security->setAuthenticationMode(true, false, true);
-  security->setCapability(ESP_IO_CAP_NONE);
-  security->setInitEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
-  security->setRespEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
-  auto* securityCallbacks = new (std::nothrow) CompanionSecurityCallbacks();
-  if (!securityCallbacks) {
-    LOG_ERR("X4CMP", "OOM: security callbacks");
-    return;
-  }
-  BLEDevice::setSecurityCallbacks(securityCallbacks);
+  //
+  // All four callback/config objects below are function-local statics, NOT
+  // per-begin() heap allocations: BLEDevice::deinit frees the server and
+  // advertising objects but never user-registered callbacks, so heap
+  // instances leak once per reader enter/exit cycle (resumeAfterReader ->
+  // begin()) — small blocks scattered exactly in the plain the reader
+  // needs contiguous. Registration still re-runs every begin() because
+  // deinit tears down the objects that held the pointers. (NimBLE's own
+  // init/deinit path leaks ~48 B/cycle at the IDF layer — esp-idf#8136 —
+  // which the 60 s stats line is left to watch.)
+  static BLESecurity security;
+  security.setAuthenticationMode(true, false, true);
+  security.setCapability(ESP_IO_CAP_NONE);
+  security.setInitEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
+  security.setRespEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
+  static CompanionSecurityCallbacks securityCallbacks;
+  BLEDevice::setSecurityCallbacks(&securityCallbacks);
 
   server = BLEDevice::createServer();
   if (!server) {
     LOG_ERR("X4CMP", "BLE server create failed");
     return;
   }
-  serverCallbacks = new (std::nothrow) CompanionServerCallbacks(*this);
-  if (!serverCallbacks) {
-    LOG_ERR("X4CMP", "OOM: server callbacks");
-    return;
-  }
-  server->setCallbacks(serverCallbacks);
+  // Binds the first caller's *this — fine, COMPANION_BLE is the only instance.
+  static CompanionServerCallbacks serverCallbacks(*this);
+  server->setCallbacks(&serverCallbacks);
 
-  BLEService* service = server->createService(CompanionProtocol::SERVICE_UUID);
+  gattService = server->createService(CompanionProtocol::SERVICE_UUID);
+  BLEService* service = gattService;
   if (!service) {
     LOG_ERR("X4CMP", "BLE service create failed");
     return;
   }
 
-  BLECharacteristic* cardCharacteristic = service->createCharacteristic(
+  cardCharacteristic = service->createCharacteristic(
       CompanionProtocol::CARD_WRITE_UUID, BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
-  cardWriteCallbacks = new (std::nothrow) CompanionCardWriteCallbacks(*this);
-  if (!cardCharacteristic || !cardWriteCallbacks) {
+  static CompanionCardWriteCallbacks cardWriteCallbacks(*this);
+  if (!cardCharacteristic) {
     LOG_ERR("X4CMP", "card characteristic setup failed");
     return;
   }
-  cardCharacteristic->setCallbacks(cardWriteCallbacks);
+  cardCharacteristic->setCallbacks(&cardWriteCallbacks);
 
   actionCharacteristic =
       service->createCharacteristic(CompanionProtocol::ACTION_NOTIFY_UUID,
@@ -259,7 +259,7 @@ void CompanionBleService::begin() {
 
   BLEAdvertisementData scanResponseData;
   scanResponseData.setCompleteServices(BLEUUID(CompanionProtocol::SERVICE_UUID));
-  addCompleteName(scanResponseData, CompanionProtocol::DEVICE_NAME);
+  addCompleteName(scanResponseData, CompanionProtocol::deviceName());
   advertising->setScanResponseData(scanResponseData);
   advertising->setScanResponse(true);
   // Preferred CONNECTION interval hint in the scan response (0x06/0x12 =
@@ -339,7 +339,7 @@ void CompanionBleService::startAdvertising() {
   advertisingWanted = true;
   if (advertising) {
     advertising->start();
-    setStatus(std::string("Advertising as ") + CompanionProtocol::DEVICE_NAME);
+    setStatus(std::string("Advertising as ") + CompanionProtocol::deviceName());
   }
 }
 
@@ -371,6 +371,12 @@ void CompanionBleService::releaseReaderTransients() {
   // are dead the moment the link drops; the phone resends whole snapshots.
   ensureMutex();
   xSemaphoreTake(stateMutex, portMAX_DELAY);
+  // The parse slot's std::strings are connected-era heap that would pin the
+  // post-suspend plain (same class as the string survivors below). Any
+  // mid-assembly multi-part state dies with the link anyway — the phone
+  // resends whole snapshots on reconnect — and scenes render from the fixed
+  // stores, which this does not touch.
+  card = CompanionCardState();
   std::string().swap(lastTodayCardJson);
   std::string().swap(lastWorkoutCardJson);
   for (auto& p : pendingPayloads) std::string().swap(p);
@@ -456,7 +462,23 @@ void CompanionBleService::shutdownRadio(const bool releaseMemory, const char* re
   xSemaphoreGive(stateMutex);
   advertising = nullptr;
   server = nullptr;
+
+  // Free the GATT graph the deleted server orphaned. Safe ONLY here, after
+  // BLEDevice::deinit: the NimBLE host is stopped, so the destructors are
+  // inert (no BLE calls — ~BLECharacteristic is a no-op; NimBLE's
+  // ~BLEService frees only its own svc-def arrays). Upstream BLEServer has
+  // no destructor, so every begin()'s service/characteristics leaked —
+  // measured 1.76 KB per reader suspend/resume cycle (X4 bench 2026-08-11,
+  // stair-step 53.1 -> 31.8 KB over 13 cycles). BLEService's destructor is
+  // friend-only; tools/patch_ble_service_friend.py grants this class access
+  // at build time (pinned framework), which is what makes the last delete
+  // legal.
+  delete cardCharacteristic;
+  cardCharacteristic = nullptr;
+  delete actionCharacteristic;
   actionCharacteristic = nullptr;
+  delete gattService;
+  gattService = nullptr;
 
   LOG_INF("X4CMP", "BLE shutdown done: heap now %u", ESP.getFreeHeap());
 }
@@ -485,29 +507,6 @@ std::string CompanionBleService::getStatusMessage() const {
   return value;
 }
 
-CompanionCardState CompanionBleService::getCard() const {
-  ensureMutex();
-  xSemaphoreTake(stateMutex, portMAX_DELAY);
-  const CompanionCardState value = card;
-  xSemaphoreGive(stateMutex);
-  return value;
-}
-
-CompanionCardState CompanionBleService::getBlockCard() const {
-  ensureMutex();
-  xSemaphoreTake(stateMutex, portMAX_DELAY);
-  const CompanionCardState value = blockCard;
-  xSemaphoreGive(stateMutex);
-  return value;
-}
-
-uint32_t CompanionBleService::getBlockCardRevision() const {
-  ensureMutex();
-  xSemaphoreTake(stateMutex, portMAX_DELAY);
-  const uint32_t value = blockCardRevision;
-  xSemaphoreGive(stateMutex);
-  return value;
-}
 
 bool CompanionBleService::getPeerAddress(char* buf, std::size_t bufSize) const {
   if (!buf || bufSize == 0) return false;
@@ -1016,13 +1015,6 @@ bool CompanionBleService::applyCardPayload(const std::string& payload) {
   xSemaphoreTake(stateMutex, portMAX_DELAY);
   next->revision = card.revision + 1;
   card = *next;
-  // M4.2 — snapshot the full block-status card into its own slot so a later
-  // priorities/today card overwriting `card` cannot strand BlockScene on
-  // "Syncing...". Its dedicated counter advances only for block traffic.
-  if (next->id == "block-status") {
-    blockCard = *next;
-    ++blockCardRevision;
-  }
   statusMessage = "Card received";
   ++revision;
   xSemaphoreGive(stateMutex);

@@ -68,39 +68,25 @@ constexpr uint32_t kTransientTimeoutMs = 4000;
 
 int clampInt(const int v, const int lo, const int hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
-// Card helpers ported from BlockActivity.cpp:43-153 (same heuristics so both
-// firmwares interpret the iOS "block-status" card identically).
-bool isBlockCard(const CompanionCardState& card) { return card.hasCard && card.id == "block-status"; }
+// Status helpers. The legacy-card heuristics (state strings, "min left"
+// title parsing — BlockActivity.cpp:43-153) live in
+// BlockStatusStore::updateFromCard now; the scene reads the ~64 B fixed
+// snapshot instead of copying the 3.6 KB generic card per repaint.
+bool isBlockCard(const BlockStatusStore::Status& st) { return st.fromCard; }
 
-bool isActiveBlockCard(const CompanionCardState& card) {
-  if (!isBlockCard(card)) return false;
-  if (card.state == "active" || card.state == "break") return true;
-  return card.title.find("min left") != std::string::npos || card.title.find("break") != std::string::npos ||
-         card.body.find("min left") != std::string::npos || card.body.find("paused") != std::string::npos;
+bool isActiveBlockCard(const BlockStatusStore::Status& st) { return st.fromCard && st.active; }
+
+bool isBreakCard(const BlockStatusStore::Status& st) { return st.fromCard && st.onBreak; }
+
+const char* presetTitle(const BlockStatusStore::Status& st, const char* fallback) {
+  return st.preset[0] ? st.preset : fallback;
 }
 
-bool isBreakCard(const CompanionCardState& card) {
-  return isBlockCard(card) && (card.state == "break" || card.body.find("paused") != std::string::npos);
+int cardDuration(const BlockStatusStore::Status& st, const int fallback) {
+  return st.durationMinutes > 0 ? st.durationMinutes : fallback;
 }
 
-const char* presetTitle(const CompanionCardState& card, const char* fallback) {
-  return card.preset.empty() ? fallback : card.preset.c_str();
-}
-
-int cardDuration(const CompanionCardState& card, const int fallback) {
-  return card.durationMinutes > 0 ? card.durationMinutes : fallback;
-}
-
-int cardRemaining(const CompanionCardState& card) {
-  if (card.remainingMinutes > 0) return card.remainingMinutes;
-  const auto minPos = card.title.find(" min");
-  if (minPos == std::string::npos) return 0;
-  int value = 0;
-  for (std::size_t i = 0; i < minPos; ++i) {
-    if (card.title[i] >= '0' && card.title[i] <= '9') value = value * 10 + (card.title[i] - '0');
-  }
-  return value;
-}
+int cardRemaining(const BlockStatusStore::Status& st) { return st.remainingMinutes; }
 
 // Width-clipping copy (same helper as NotificationsScene) for the header
 // status line, which comes from the BLE service as a free-form message.
@@ -439,13 +425,12 @@ void BlockScene::drawLock(Gfx& gfx, const int cx, const int topY, const bool loc
   }
 }
 
-void BlockScene::renderReady(Gfx& gfx, const CompanionCardState& card) const {
+void BlockScene::renderReady(Gfx& gfx, const BlockStatusStore::Status& card) const {
   const int w = gfx.width();
   const int h = gfx.height();
   const int cx = w / 2;
   const BlockMode& mode = kModes[clampInt(_modeSel, 0, MODE_COUNT - 1)];
-  const bool readyCard = isBlockCard(card) && card.state == "ready";
-  const char* title = readyCard ? presetTitle(card, mode.title) : mode.title;
+  const char* title = card.ready ? presetTitle(card, mode.title) : mode.title;
 
   // −/+ duration tabs on the screen edges (top-edge physical buttons).
   gfx.drawRoundedRect(-kSideTabRadius, kSideTabY, kSideTabW + kSideTabRadius, kSideTabH, kSideTabRadius, 1, true);
@@ -497,23 +482,22 @@ void BlockScene::renderReady(Gfx& gfx, const CompanionCardState& card) const {
   drawArtwork(gfx, BlockHeroField, (w - BlockHeroWidth) / 2, heroY, BlockHeroWidth, BlockHeroHeight);
 }
 
-void BlockScene::renderActive(Gfx& gfx, const CompanionCardState& card) {
+void BlockScene::renderActive(Gfx& gfx, const BlockStatusStore::Status& card) {
   const int w = gfx.width();
   const int h = gfx.height();
   const int cx = w / 2;
-  const bool freshCard = isBlockCard(card);
-  const BlockStatusStore::Status seeded = BLOCK_STATUS.get();
 
-  // Preset/title: fresh card first, else the persisted snapshot, else default.
-  const char* title =
-      freshCard ? presetTitle(card, "Deep Work") : (seeded.preset[0] ? seeded.preset : "Deep Work");
+  // The snapshot carries both provenances (fromCard distinguishes them), so
+  // the old fresh-card/seeded duality collapses: preset and onBreak read the
+  // same either way.
+  const char* title = presetTitle(card, "Deep Work");
 
   // A LIVE countdown exists only once we've latched an end from a real card
-  // (or the raw card still carries remainingMinutes). A pure wake-from-sleep
+  // (or the card still carries remainingMinutes). A pure wake-from-sleep
   // seed has NO elapsed-time info (no RTC on X3/X4), so we must show the phone's
   // ABSOLUTE end label ("until 10:30 AM") instead of a stale minute number.
-  const bool haveLive = _endValid || (freshCard && cardRemaining(card) > 0);
-  const bool onBreak = freshCard ? isBreakCard(card) : seeded.onBreak;
+  const bool haveLive = _endValid || (card.fromCard && card.remainingMinutes > 0);
+  const bool onBreak = card.onBreak;
 
   gfx.drawTextCentered(kFontBold, cx, kTitleY, title);
 
@@ -552,8 +536,8 @@ void BlockScene::renderActive(Gfx& gfx, const CompanionCardState& card) {
     // when the phone reconnects and pushes a fresh block-status card.
     _shownRemaining = -1;  // no live minute on glass yet
     char endLabel[32];
-    if (seeded.endsAtLabel[0]) {
-      snprintf(endLabel, sizeof(endLabel), "until %s", seeded.endsAtLabel);
+    if (card.endsAtLabel[0]) {
+      snprintf(endLabel, sizeof(endLabel), "until %s", card.endsAtLabel);
     } else {
       snprintf(endLabel, sizeof(endLabel), "%s", onBreak ? "on a break" : "active");
     }
@@ -612,21 +596,18 @@ void BlockScene::renderBreak(Gfx& gfx) const {
 
 void BlockScene::render(Gfx& gfx) {
   _wCache = static_cast<int16_t>(gfx.width());  // header dirty rect (arrow flash)
-  // One card copy per repaint (renders happen only on dirty — entry, input,
-  // a companion revision change marshalled by main.cpp, or the local minute
-  // tick).
-  // Read the dedicated block-status cache, not the generic card slot: the
-  // BLE-connect resync burst (block.status + priorities + today) overwrites the
-  // shared slot with the trailing priorities/today card, so getCard() would
-  // report isBlockCard()==false and strand the scene on "Syncing...". The
-  // block cache holds the last block-status card regardless of that traffic.
-  const CompanionCardState card = COMPANION_BLE.getBlockCard();
+  // Renders happen only on dirty — entry, input, a store revision change
+  // marshalled by main.cpp, or the local minute tick. The store snapshot is
+  // block-status-only by construction (updateFromCard runs only for
+  // block-status cards), so the old "resync burst clobbers the shared card
+  // slot" hazard is structurally gone.
+  const BlockStatusStore::Status card = BLOCK_STATUS.get();
 
-  // A FRESH block-status card (the block cache's own revision advances only
-  // when a block-status card lands — CompanionBleService.cpp applyCardPayload)
-  // is the phone's authoritative answer: it resolves any pending transient,
-  // cancels optimism, and re-anchors the local countdown.
-  const uint32_t blockRevision = COMPANION_BLE.getBlockCardRevision();
+  // A FRESH block-status card (fromCard, new revision) is the phone's
+  // authoritative answer: it resolves any pending transient, cancels
+  // optimism, and re-anchors the local countdown. Seed/count revisions also
+  // pass through here; the fromCard guard keeps them from acting as cards.
+  const uint32_t blockRevision = BLOCK_STATUS.revision();
   if (blockRevision != _seenCardRevision) {
     _seenCardRevision = blockRevision;
     if (isBlockCard(card)) {
@@ -665,12 +646,12 @@ void BlockScene::render(Gfx& gfx) {
   // sleep), fall back to the NVS-seeded snapshot so the locked view shows
   // immediately. A real block-status card (isBlockCard) always wins — if it
   // says ready/stopped, the seed is dropped (block ended during sleep).
-  const bool seedActive = !isBlockCard(card) && !_optimisticActive && !_optimisticReady && BLOCK_STATUS.active();
+  const bool seedActive = !isBlockCard(card) && !_optimisticActive && !_optimisticReady && card.active;
   _activeCache = _optimisticReady ? false : (isActiveBlockCard(card) || _optimisticActive || seedActive);
 
   // Adopt the phone's configured duration while the user hasn't touched −/+
   // (BlockActivity::loop does the same on each revision change).
-  if (!_durationCustomized && isBlockCard(card) && card.state == "ready" && card.durationMinutes > 0) {
+  if (!_durationCustomized && card.ready && card.durationMinutes > 0) {
     _durationMin = clampInt(card.durationMinutes, kMinBlockMinutes, kMaxBlockMinutes);
   }
 

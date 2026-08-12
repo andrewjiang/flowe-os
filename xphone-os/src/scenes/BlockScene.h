@@ -30,7 +30,7 @@
 
 #include "../Scene.h"
 
-struct CompanionCardState;
+#include "../BlockStatusStore.h"
 
 class BlockScene : public Scene {
  public:
@@ -67,8 +67,8 @@ class BlockScene : public Scene {
   void tickTransients(uint32_t now);        // timeout + minute tick + zero-confirm
 
   void renderHeader(Gfx& gfx) const;
-  void renderReady(Gfx& gfx, const CompanionCardState& card) const;
-  void renderActive(Gfx& gfx, const CompanionCardState& card);
+  void renderReady(Gfx& gfx, const BlockStatusStore::Status& card) const;
+  void renderActive(Gfx& gfx, const BlockStatusStore::Status& card);
   void renderModes(Gfx& gfx) const;
   void renderBreak(Gfx& gfx) const;
   void drawLock(Gfx& gfx, int cx, int topY, bool locked) const;

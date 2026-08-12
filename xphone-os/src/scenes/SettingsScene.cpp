@@ -1,6 +1,8 @@
 #include "SettingsScene.h"
 
 #include <SDCardManager.h>
+
+#include "../DeviceKind.h"
 #include <esp_system.h>
 
 #include <cstdio>
@@ -32,11 +34,6 @@ constexpr int kMarginX = 20;   // = CrossPoint contentSidePadding (BaseTheme.h:1
 constexpr int kHeaderH = 46;   // ~= CrossPoint headerHeight 45 (BaseTheme.h:128)
 constexpr int kRowPad = 16;    // row height = lineHeight(bold) + kRowPad
 
-#if FREEINK_DEVICE_X4
-constexpr const char* kBuildEnv = "x4";
-#else
-constexpr const char* kBuildEnv = "x3";
-#endif
 
 constexpr const char* kMenuLabels[5] = {"File Transfer", "SD Firmware Update", "Icon style", "Restart", "About"};
 constexpr int kMenuCount = 5;
@@ -301,7 +298,7 @@ void SettingsScene::renderMenu(Gfx& gfx) {
   // Footer: firmware version + build env, bottom of the content area
   // (mirrors CrossPoint showing CROSSPOINT_VERSION in the settings header).
   char footer[64];
-  snprintf(footer, sizeof(footer), "xphone-os %s (%s build)", XPHONE_VERSION, kBuildEnv);
+  snprintf(footer, sizeof(footer), "xphone-os %s (%s)", XPHONE_VERSION, gDeviceIsX3 ? "x3" : "x4");
   const int footY = gfx.height() - Scene::SOFTKEY_BAR_H - gfx.lineHeight(kFontRegular) - 6;
   gfx.drawTextCentered(kFontRegular, gfx.width() / 2, footY, footer);
 }

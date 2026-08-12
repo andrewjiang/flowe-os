@@ -183,7 +183,7 @@ void AboutScene::render(Gfx& gfx) {
   } else if (COMPANION_BLE.isConnected()) {
     snprintf(line, sizeof(line), "ble: connected");
   } else {
-    snprintf(line, sizeof(line), "ble: advertising as %s", CompanionProtocol::DEVICE_NAME);
+    snprintf(line, sizeof(line), "ble: advertising as %s", CompanionProtocol::deviceName());
   }
   gfx.drawText(kFontRegular, x, y, line);
   y += gfx.lineHeight(kFontRegular) + 4;

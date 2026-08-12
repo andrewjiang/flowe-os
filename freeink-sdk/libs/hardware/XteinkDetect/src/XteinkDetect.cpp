@@ -72,6 +72,37 @@ bool probeQmi8658() {
   return false;
 }
 
+// Nine-pulse bus clear (NXP I2C spec 3.1.16). A slave left mid-transaction
+// by an unclean reset can hold SDA low indefinitely; every probe below would
+// then fail and an X3 would fingerprint as an X4 — wrong panel protocol,
+// blind device. Toggling SCL up to nine times lets the stuck slave clock out
+// its remaining bits and release SDA; the manual STOP afterwards resets every
+// slave's bus state machine. No-op (one read) when the bus is already idle —
+// including on every X4, where nothing drives these pins.
+void clearStuckBus() {
+  pinMode(X3_I2C_SDA, INPUT_PULLUP);
+  pinMode(X3_I2C_SCL, INPUT_PULLUP);
+  delayMicroseconds(10);
+  if (digitalRead(X3_I2C_SDA) == HIGH) return;
+
+  pinMode(X3_I2C_SCL, OUTPUT_OPEN_DRAIN);
+  digitalWrite(X3_I2C_SCL, HIGH);
+  for (int i = 0; i < 9 && digitalRead(X3_I2C_SDA) == LOW; ++i) {
+    digitalWrite(X3_I2C_SCL, LOW);
+    delayMicroseconds(10);  // ~50 kHz half-periods: slow enough for any slave
+    digitalWrite(X3_I2C_SCL, HIGH);
+    delayMicroseconds(10);
+  }
+  // STOP condition — SDA rising while SCL is high.
+  pinMode(X3_I2C_SDA, OUTPUT_OPEN_DRAIN);
+  digitalWrite(X3_I2C_SDA, LOW);
+  delayMicroseconds(10);
+  digitalWrite(X3_I2C_SDA, HIGH);
+  delayMicroseconds(10);
+  pinMode(X3_I2C_SDA, INPUT);
+  pinMode(X3_I2C_SCL, INPUT);
+}
+
 uint8_t runProbePass() {
   Wire.begin(X3_I2C_SDA, X3_I2C_SCL, X3_I2C_FREQ);
   Wire.setTimeOut(6);
@@ -86,6 +117,7 @@ uint8_t runProbePass() {
 }  // namespace
 
 bool detectXteinkIsX3() {
+  clearStuckBus();
   const uint8_t pass1 = runProbePass();
   delay(2);
   const uint8_t pass2 = runProbePass();

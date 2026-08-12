@@ -100,6 +100,30 @@ static void drawBootSplash(Gfx& g) {
 // Boot sequence with timed stages.
 // ---------------------------------------------------------------------------
 
+#include <SDCardManager.h>
+#include <XteinkDetect.h>
+
+#include "DeviceKind.h"
+
+bool gDeviceIsX3 = false;  // set in boot() by selectXteinkDevice(); X4 = SDK default
+
+// Remote-debug breadcrumbs for units that never paint (field X3 that hangs
+// under xphone-os with no serial access; CrossPoint works). Armed ONLY when
+// /boot-trace.txt already exists on the card — the tester creates it, boots,
+// pulls the card, and the last appended line names the stage that died.
+// Normal boots: one existence probe, zero writes.
+static bool gBootTrace = false;
+static void bootTrace(const char* stage) {
+  if (!gBootTrace) return;
+  FsFile f = SdMan.open("/boot-trace.txt", O_WRONLY | O_APPEND);
+  if (!f) return;
+  char line[96];
+  const int n = snprintf(line, sizeof(line), "%8lu ms  %s\n", millis(), stage);
+  if (n > 0) f.write(reinterpret_cast<const uint8_t*>(line), static_cast<size_t>(n));
+  f.flush();
+  f.close();
+}
+
 // M4.2 wake diagnostic: esp_reset_reason() -> short label. Captured at the very
 // top of boot() so the About scene can show whether the X3 power-button wake is
 // a genuine deep-sleep resume (DEEPSLEEP) or a full power-on reset (POWERON) —
@@ -134,13 +158,16 @@ static void boot() {
   Serial.setTxTimeoutMs(1);
   const unsigned long tSerial = millis();
 
-  // Stage 2: display. X3-only builds already boot with the X3 profile active,
-  // but call setDisplayX3() anyway — it is the documented selection API and
-  // makes the panel choice explicit (FreeInkDisplay.cpp:65-75; mirrors
-  // x4-os/lib/hal/HalDisplay.cpp:15-17).
-#if FREEINK_DEVICE_X3 && !FREEINK_DEVICE_X4
-  display.setDisplayX3();
-#endif
+  // Stage 2: device fingerprint, then display. One binary serves X3 and X4
+  // (field brick: X4 bin on an X3 drives SSD1677 protocol at UC8253 glass —
+  // frozen panel, "dead" buttons). selectXteinkDevice() probes the X3-only
+  // I2C parts (gauge/RTC/IMU) and sets BoardConfig::ACTIVE; it must run
+  // BEFORE SD + display bring-up (XteinkDetect.h contract).
+  gDeviceIsX3 = freeink::selectXteinkDevice();
+  Serial.printf("[xphone-os] boot: xteink detect -> %s\n", gDeviceIsX3 ? "X3" : "X4");
+  if (gDeviceIsX3) {
+    display.setDisplayX3();
+  }
   // Shared SPI bus, initialized ONCE with the SD card's MISO attached
   // (mirrors x4-os/lib/hal/HalGPIO.cpp:195). Display and SD share SCLK=8 /
   // MOSI=10; SD adds MISO=7 + CS=12 (BoardConfig.h XTEINK_X3/X4 profiles).
@@ -151,8 +178,23 @@ static void boot() {
   // unassigned), so this is the only place the bus is configured.
   SPI.begin(BoardConfig::ACTIVE.display.sclk, BoardConfig::ACTIVE.sd.miso, BoardConfig::ACTIVE.display.mosi,
             BoardConfig::ACTIVE.display.cs);
+
+  // Arm the breadcrumb tracer before the display — the prime hang suspect on
+  // the affected unit is display.begin()'s BUSY waits. SdMan.begin() is
+  // idempotent; sd_update below remounts/reuses the same instance.
+  if (SdMan.begin()) {
+    FsFile probe = SdMan.open("/boot-trace.txt", O_RDONLY);
+    if (probe) {
+      probe.close();
+      gBootTrace = true;
+      bootTrace(gDeviceIsX3 ? "boot: spi up, detect=X3" : "boot: spi up, detect=X4");
+    }
+  }
+
+  bootTrace("display.begin: start");
   display.begin();
   const unsigned long tDisplay = millis();
+  bootTrace("display.begin: done");
 
   Serial.printf("[xphone-os] M1 boot on %s (%ux%u, fb %lu bytes)\n", BoardConfig::ACTIVE.name,
                 display.getDisplayWidth(), display.getDisplayHeight(),
@@ -166,6 +208,7 @@ static void boot() {
   const bool gfxOk = gfx.begin();
   if (gfxOk) drawBootSplash(gfx);
   const unsigned long tSplash = millis();
+  bootTrace(gfxOk ? "gfx: splash drawn" : "gfx: NO FRAMEBUFFER");
 
   // Stage 2.5: SD firmware self-update — MUST stay this early in boot. Mounts
   // the SD card and, if /update.bin exists at the root, flashes it into the
@@ -173,6 +216,7 @@ static void boot() {
   // an X and falls through so the device is never stranded.
   sd_update::checkAndApply(display);
   const unsigned long tSdUpdate = millis();
+  bootTrace("sd-update: checked");
 
   // Stage 3: input. ADC-ladder buttons per BoardConfig (front 4 on GPIO1,
   // side Up/Down on GPIO2, power on GPIO3).
@@ -180,6 +224,7 @@ static void boot() {
   // M5 Phase 1: dedicated 5ms sampling task — presses register (and latch)
   // even while the loop is composing or a flush is in flight.
   input.beginTask();
+  bootTrace("input: live");
 
   // Stage 4: launcher — nothing to draw with if gfx failed above, so log and
   // idle (SD update already ran, so the device remains recoverable).
@@ -232,27 +277,34 @@ static void boot() {
   // solicitation UUID in the adv packet); the ANCS client arms itself and
   // starts service discovery once an iPhone connects and the link
   // authenticates (that is when iOS shows its pairing prompt).
-  // Inflate dict: static BSS, installed once here. The old "do NOT reserve
-  // reader buffers before BLE" rule came from a ~3.5 KB-free measurement
-  // that predates radio turn-taking (the radio is down for the whole Reader
-  // scene and returns on exit; a BLE-connected shelf was tried and starved —
-  // full bring-up beside Reader residency left 1.3 KB free). Heap-parking was also
-  // moot in practice: the running heap never has a 32 KB contiguous hole on
-  // X3-class devices (103 KB free, largest block 29684 measured), so every
-  // reserve attempt failed and zip reads fell to one-shot mode. As static
-  // BSS the dict never competes for heap and never fragments it. Open risk
-  // being validated: Wi-Fi file transfer must fit in the ~32 KB-smaller
-  // heap alongside this (FileTransferScene can no longer free the dict).
-  // NO permanent dict: the static-BSS experiment left X3 BLE with 3.8 KB free
-  // (min 3652) — links formed but discovery-time allocations failed and iOS
-  // hung at "discovering services". The dict is claimed at Reader suspend
-  // (suspendRadioForBookWork) and freed on exit; when the post-suspend claim
-  // loses to fragmentation, big-chapter indexing degrades to a retryable
-  // "Couldn't index" (never a panic) until the fragmenter fix lands.
-  COMPANION_BLE.begin();
-  COMPANION_ANCS.begin();
-  COMPANION_ANCS.requestPairing();
-  Serial.printf("[xphone-os] BLE companion + ANCS armed (%lu ms after boot)\n", millis() - tBoot);
+  // Inflate dict (32 KB zip window) — current design, after two failed
+  // experiments: the dict is heap-claimed only while the Reader scene is up
+  // (claimed at radio suspend, freed on exit), and blocking inflate work
+  // additionally borrows the framebuffer via InflateReader::lendDict()
+  // (ReaderScene.cpp), so paging never depends on finding a contiguous
+  // 32 KB heap block at all. History that shaped this: a permanent static
+  // BSS dict left X3 BLE with 3.8 KB free (min 3652) — links formed but
+  // discovery-time allocations failed and iOS hung at "discovering
+  // services"; and heap-parking before BLE was moot because the running
+  // heap never had a 32 KB contiguous hole on X3-class devices (103 KB
+  // free, largest block 29,684 measured).
+  // M4.2 restore + radios: when the restore landed in the Reader, the book
+  // state is already resident (~60 KB) and the radio must NOT come up beside
+  // it — BLE init in that heap wedges boot (observed hard hang on X4:
+  // "Starting BLE companion service" then nothing, 53 KB largest block).
+  // Honor the reader's turn-taking invariant from boot: leave the radio
+  // down; ReaderScene's exit path resumes it (resumeAfterReader -> begin +
+  // ANCS rearm), exactly like an in-session reader entry. ReaderScene's
+  // onEnter already set _radioSuspended unconditionally, so the exit resume
+  // fires even though there was nothing to suspend.
+  if (gCurrentSceneId == SceneId::Reader) {
+    Serial.println("[xphone-os] radios deferred: Reader scene restored (resume on reader exit)");
+  } else {
+    COMPANION_BLE.begin();
+    COMPANION_ANCS.begin();
+    COMPANION_ANCS.requestPairing();
+    Serial.printf("[xphone-os] BLE companion + ANCS armed (%lu ms after boot)\n", millis() - tBoot);
+  }
 
   // Stage 6 (M2.1b): drop the CPU to XP_CPU_MHZ. Placed AFTER BLE begin() so
   // the whole radio bring-up runs at the boot clock and the stack never
@@ -279,7 +331,7 @@ static uint8_t gResyncRetriesLeft = 0;
 // blkRev check so the retry backstop waits on whichever card scene is up.
 static uint32_t activeSceneRailRevision() {
   switch (gCurrentSceneId) {
-    case SceneId::Block:      return COMPANION_BLE.getBlockCardRevision();
+    case SceneId::Block:      return BLOCK_STATUS.revision();
     case SceneId::Priorities: return PRIORITIES_STORE.revision();
     case SceneId::Today:      return TODAY_STORE.revision();
     case SceneId::Workout:    return WORKOUT_STORE.revision();
@@ -395,13 +447,14 @@ static void pumpCompanionEvents() {
 
   // M3: Block's status card ("block-status", remaining-minutes countdown pushed
   // by the iPhone) repaints ONLY the Block scene, and only while it is on glass.
-  // SCOPED to getBlockCardRevision() (the block-status-only rail) rather than the
-  // generic getRevision(): a Priorities or Today card landing bumps getRevision()
-  // too, and marking Block dirty on those caused a cross-scene repaint storm
-  // (Block repainting for a card it doesn't show). Priorities and Today each have
-  // their own store-revision pump below, so they still repaint on their own data.
+  // SCOPED to BLOCK_STATUS.revision() (the block-status-only rail) rather than
+  // the generic getRevision(): a Priorities or Today card landing bumps
+  // getRevision() too, and marking Block dirty on those caused a cross-scene
+  // repaint storm (Block repainting for a card it doesn't show). Priorities and
+  // Today each have their own store-revision pump below, so they still repaint
+  // on their own data.
   static uint32_t lastBlockCardRevision = 0;
-  const uint32_t blockCardRevision = COMPANION_BLE.getBlockCardRevision();
+  const uint32_t blockCardRevision = BLOCK_STATUS.revision();
   if (blockCardRevision != lastBlockCardRevision) {
     lastBlockCardRevision = blockCardRevision;
     markBlockDirtyIfActive();
@@ -570,9 +623,20 @@ static void reportRuntimeStats() {
   const UBaseType_t loopHwm = uxTaskGetStackHighWaterMark(nullptr);
   const TaskHandle_t bleTask = COMPANION_ANCS.getHostTaskHandle();
   const UBaseType_t bleHwm = bleTask ? uxTaskGetStackHighWaterMark(bleTask) : 0;
-  Serial.printf("[xphone-os] stats: loopHWM=%u B bleHWM=%s%u B heapFree=%u minFree=%u ancsQpeak=%u drops=%lu\n",
-                static_cast<unsigned>(loopHwm), bleTask ? "" : "n/a ", static_cast<unsigned>(bleHwm),
-                ESP.getFreeHeap(), static_cast<unsigned>(esp_get_minimum_free_heap_size()),
+  // Fragmentation health: `largest` is the biggest single allocation the heap
+  // can satisfy right now; frag% = how much of the free total is unreachable
+  // as one block (0 = one contiguous plain). A rising frag% at a stable
+  // heapFree is the leak-shrapnel signature that pinned the reader's window.
+  const uint32_t heapFree = ESP.getFreeHeap();
+  const uint32_t largest = static_cast<uint32_t>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+  const unsigned fragPct = heapFree ? static_cast<unsigned>(100u - (largest * 100u) / heapFree) : 0;
+  const char* mode = gCurrentSceneId == SceneId::Reader        ? "reader"
+                     : gCurrentSceneId == SceneId::FileTransfer ? "transfer"
+                                                                : "connected";
+  Serial.printf("[xphone-os] stats: mode=%s loopHWM=%u B bleHWM=%s%u B heapFree=%u largest=%u frag=%u%% minFree=%u "
+                "ancsQpeak=%u drops=%lu\n",
+                mode, static_cast<unsigned>(loopHwm), bleTask ? "" : "n/a ", static_cast<unsigned>(bleHwm), heapFree,
+                largest, fragPct, static_cast<unsigned>(esp_get_minimum_free_heap_size()),
                 COMPANION_ANCS.getQueueHighWater(),
                 static_cast<unsigned long>(COMPANION_ANCS.getQueueDropCount()));
 }
