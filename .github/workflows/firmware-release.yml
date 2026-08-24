@@ -98,9 +98,27 @@ jobs:
             > ziproot/flowe-x4/README.txt
           (cd ziproot && zip -qr ../dist/flowe-x4.zip flowe-x4)
 
+          # Neutral zip: the flash page's single Download button links
+          # releases/latest/download/flowe-firmware.zip, so every release
+          # must carry it or the button 404s the day a new tag lands.
+          mkdir -p ziproot/flowe-firmware
+          cp dist/flowe-x3.bin ziproot/flowe-firmware/update.bin
+          printf '%s\n' \
+            'Flowe OS firmware - works on both the Xteink X3 and X4' \
+            '' \
+            '1. Copy update.bin to the root of the microSD card.' \
+            '2. Put the card back in the device.' \
+            '3. Hold the left side button and power together until the' \
+            '   update screen appears.' \
+            '' \
+            'Guide: https://www.flowe.ink/flash' \
+            > ziproot/flowe-firmware/README.txt
+          (cd ziproot && zip -qr ../dist/flowe-firmware.zip flowe-firmware)
+
           (
             cd dist
             sha256sum \
+              flowe-firmware.zip \
               flowe-x3.zip \
               flowe-x4.zip \
               update.bin \
