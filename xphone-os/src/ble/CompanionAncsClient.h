@@ -77,6 +77,15 @@ class CompanionAncsClient final {
   // the name resolves. Main-loop only (reads the cache the ingest path fills).
   void appDisplayName(const char* bundleId, char* out, std::size_t outSize) const;
 
+  // Seed (or refresh) the app-name cache from the companion's "notif.push"
+  // card: Android has no ANCS GetAppAttributes, so the phone supplies the
+  // display label. Inserts through the same noteAppSeen() tally/eviction path
+  // (so pushed apps appear in the notif.apps picker too); a non-empty `name`
+  // lands as resolved (state 2) so pumpBackfill() never queues an ANCS fetch
+  // for it. Main-loop only (called from CompanionBleService::processPending's
+  // card parse), matching every other cache accessor.
+  void seedAppName(const char* bundleId, const char* name);
+
   // Snapshot enumeration for the companion's notification-app picker. The
   // cache is owned and mutated by the main-loop ANCS parser; sendNotifApps()
   // also runs on that loop, so copying here follows the cache's existing
@@ -119,6 +128,11 @@ class CompanionAncsClient final {
   void handleAuthenticationComplete(ble_gap_conn_desc* desc);
   int handleGapEvent(ble_gap_event* event);
   void handleServiceDiscovered(uint16_t startHandle, uint16_t endHandle);
+  // EDONE on the SERVICE walk. Mirrors handleCharacteristicDiscoveryComplete:
+  // it must not blindly clear state, because EDONE also arrives immediately
+  // behind a SUCCESSFUL service callback — only a walk that found nothing
+  // ends with serviceStartHandle still 0.
+  void handleServiceDiscoveryComplete();
   void handleCharacteristicDiscovered(const ble_uuid_t* uuid, uint16_t valueHandle);
   void handleCharacteristicDiscoveryComplete();
   void handleDataSourceSubscribed();
@@ -230,6 +244,11 @@ class CompanionAncsClient final {
   // Discovery watchdog state (main-loop-only, via maybeKickDiscovery).
   uint32_t notReadySinceMs = 0;  // 0 = timer disarmed
   uint8_t discoveryKicks = 0;    // kicks this connection (capped)
+  // Consecutive COMPLETED service walks that found no ANCS. Three means the
+  // central genuinely has none (an Android phone) — park discovery until the
+  // next connect. A stuck or failed walk does NOT count: the never-give-up
+  // rule (Andrew, 2026-08-17) still covers those.
+  uint8_t emptyWalks = 0;
   // When the in-flight fetch is a GetAppAttributes lookup (not a notification
   // attribute fetch) so the gate release / timeout can revert the right state.
   bool fetchInFlightIsApp = false;

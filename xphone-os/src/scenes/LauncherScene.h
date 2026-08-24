@@ -16,6 +16,10 @@ class LauncherScene : public Scene {
   static constexpr int COLS = 2;
   static constexpr int APP_COUNT = 6;
 
+  // Bench dev console ("where"): expose the grid selection so remote
+  // navigation is fact-based, never dead reckoning.
+  int selection() const { return _sel; }
+
  private:
   void moveSelection(int dCol, int dRow);
   // Logical rect of grid cell i (tile + label, small slop), from the layout

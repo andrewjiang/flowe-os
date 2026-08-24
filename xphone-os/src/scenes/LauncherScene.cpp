@@ -147,7 +147,7 @@ void LauncherScene::handleInput(Input& in) {
 
 const char* const* LauncherScene::softKeys() const {
   // Slot 0 (BACK button) opens Settings on the launcher; About lives inside it.
-  static constexpr const char* kKeys[4] = {"SETTINGS", "OPEN", "PREV", "NEXT"};
+  static constexpr const char* kKeys[4] = {"SETTINGS", "OPEN", SoftKey::Left, SoftKey::Right};
   return kKeys;
 }
 

@@ -56,6 +56,9 @@ struct XpFont {
   int8_t ascender;      // EpdFontData::ascender
 };
 
+class Gfx;
+extern Gfx* G_GFX;
+
 class Gfx {
  public:
   explicit Gfx(EInkDisplay& d) : _d(d) {}
@@ -66,6 +69,37 @@ class Gfx {
 
   int width() const { return _w; }
   int height() const { return _h; }
+
+  // 0.7 landscape reading. Portrait is the phone-style default every scene
+  // is laid out in (logical 528x792 / 480x800, drawn with a 90 degrees CW
+  // rotation into the native landscape framebuffer). Landscape is the
+  // IDENTITY transform — the panel is natively landscape — so logical
+  // width/height swap and drawing gets marginally cheaper. Only the reader
+  // switches this, and it always restores Portrait on exit: no other scene
+  // has landscape layouts.
+  enum class Orient : uint8_t { Portrait = 0, Landscape = 1 };
+  void setOrientation(Orient o);
+  Orient orientation() const { return _orient; }
+
+  // True when every character of `text` has a glyph in `f`. The UI fonts
+  // are ASCII+Latin subsets, so an Arabic/CJK/Cyrillic string would draw
+  // as a row of "?" — callers with a bitmap alternative (the FBP shaped
+  // title strip) use this to choose.
+  bool canRender(const XpFont& f, const char* text) const;
+
+  // Integer-scaled text. The builtin fonts ship at three sizes only
+  // (12pt regular/bold, 10pt small), which caps typographic hierarchy —
+  // a stats page wants a number that reads across the room. Nearest-
+  // neighbor scaling of a 1-bit bitmap face is exact (every source pixel
+  // becomes a scale x scale block), so it stays crisp on e-ink instead
+  // of going soft the way a resampled grayscale glyph would. Use for
+  // NUMERALS and short labels; body text should stay at native size.
+  void drawTextScaled(const XpFont& f, int x, int y, const char* text, int scale,
+                      bool black = true);
+  void drawTextScaledCentered(const XpFont& f, int cx, int y, const char* text, int scale,
+                              bool black = true);
+  int textWidthScaled(const XpFont& f, const char* text, int scale) const;
+  int lineHeightScaled(const XpFont& f, int scale) const { return f.lineAdvance * scale; }
 
   // M3: the wrapped panel — for the SdUpdate flash UI (progress bar / error
   // X), which draws its font-free chrome straight on the EInkDisplay.
@@ -90,6 +124,14 @@ class Gfx {
   void drawText(const XpFont& f, int x, int y, const char* text, bool black = true);
   void drawTextCentered(const XpFont& f, int cx, int y, const char* text, bool black = true);
   int lineHeight(const XpFont& f) const { return f.lineAdvance; }
+  // Height of a capital, measured from the 'H' glyph box. lineAdvance carries
+  // ascender + descender + leading (24 px against a 15 px cap in the small
+  // font), which is the right pitch for prose and far too loose for stacked
+  // letters — the landscape soft keys derive their pitch from THIS instead.
+  int capHeight(const XpFont& f) const;
+  // Offset from a drawText y (top of line) to the top pixel of a capital.
+  // Lets a caller place caps on an exact grid: y = wantTop - capTopOffset(f).
+  int capTopOffset(const XpFont& f) const;
   // M3 detail views: greedy word wrap. Draws up to maxLines lines starting at
   // (x, y) (top of the first line, lines advance by lineAdvance), breaking at
   // spaces; a word longer than maxWidth is hard-broken at a UTF-8 codepoint
@@ -126,4 +168,5 @@ class Gfx {
   EInkDisplay& _d;
   uint8_t* _fb = nullptr;
   int _w = 0, _h = 0, _wBytes = 0;
+  Orient _orient = Orient::Portrait;
 };

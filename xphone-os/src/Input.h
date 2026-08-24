@@ -100,6 +100,26 @@ class Input {
   // Any ladder press edge since the last update() drain (idle-timer reset).
   bool wasAnyPressed() const { return _anyThisTick; }
 
+  // Bench dev console (main.cpp pumpDevConsole): inject a synthetic TAP or
+  // LONG-PRESS as if the sampling task had latched it — drains through
+  // update() exactly like a physical press. The tap/long distinction is the
+  // whole input vocabulary: scenes only ever consume the one-shot edges, so
+  // these two cover every ladder-button behavior (a real long-press also
+  // suppresses its release-tap, which injection matches by setting only one
+  // bit). Guarded by USB-host presence at the call site.
+  void injectTap(Btn b) {
+    portENTER_CRITICAL(&_mux);
+    _pendingTap |= (1u << static_cast<uint8_t>(b));
+    _pendingAny = true;
+    portEXIT_CRITICAL(&_mux);
+  }
+  void injectLong(Btn b) {
+    portENTER_CRITICAL(&_mux);
+    _pendingLong |= (1u << static_cast<uint8_t>(b));
+    _pendingAny = true;
+    portEXIT_CRITICAL(&_mux);
+  }
+
   // Power button (digital pin per BoardConfig input.power — GPIO3 on X3/X4,
   // active-low; the SDK debounces it alongside the ladder buttons). Published
   // by the sampling task; single-word volatile reads are atomic on the C3.

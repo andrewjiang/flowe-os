@@ -98,7 +98,7 @@ void WorkoutScene::onExit() {
 void WorkoutScene::flushPendingSend() { sendPendingNow(); }
 
 const char* const* WorkoutScene::softKeys() const {
-  static constexpr const char* kList[4] = {"BACK", "+SET", "UP", "DOWN"};
+  static constexpr const char* kList[4] = {"BACK", "+SET", SoftKey::Left, SoftKey::Right};
   static constexpr const char* kEmpty[4] = {"BACK", "SYNC", nullptr, nullptr};
   return WORKOUT_STORE.count() > 0 ? kList : kEmpty;
 }

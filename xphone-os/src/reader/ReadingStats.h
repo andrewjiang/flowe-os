@@ -39,6 +39,39 @@ class ReadingStats {
   };
   static Band band();
 
+  // Per-book lifetime totals for the reader menu's stats page. Includes
+  // the OPEN session's live pages/time when it is this book. Returns
+  // false when the book has no recorded reading yet (and no session).
+  static bool bookStats(const std::string& bookPath, uint32_t* pages, uint32_t* minutes,
+                        uint32_t* lastDay, uint32_t* firstDay = nullptr,
+                        uint16_t* daysRead = nullptr);
+
+  // Today's recorded reading minutes plus the open session's live time
+  // (0 when the clock is unknown).
+  static uint16_t todayMinutes();
+
+  // Everything the full stats page shows beyond the band: records and
+  // lifetime totals derived from the same 64-day ring and book table.
+  struct Summary {
+    uint16_t longestStreak;   // best consecutive-day run inside the ring
+    uint16_t bestDayMinutes;  // single best day inside the ring
+    uint32_t lifetimeMinutes;
+    uint32_t lifetimePages;
+    uint16_t booksThisYear;   // books with reading recorded this calendar year
+    uint16_t booksAllTime;    // books with ANY recorded reading — needs no clock,
+                              // so the stats page still has something to say
+                              // before the phone has ever set the date
+    uint32_t monthMask;       // bit (d-1) set = read on day d of this month
+    uint8_t monthDays;        // days in the current month
+    uint8_t monthRead;        // how many of them have reading
+    bool clockValid;
+  };
+  static Summary summary();
+
+  // Today as yyyymmdd from the phone-synced clock (0 = never synced).
+  // Exposed so the stats page can title itself with the real month.
+  static uint32_t todayYmdPublic();
+
   // Whole store as JSON for the transfer server's /stats endpoint.
   static std::string toJson();
 

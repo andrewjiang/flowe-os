@@ -27,6 +27,46 @@ constexpr int kTabRadius = 10;  // top-corner radius
 // front buttons instead of stretching edge to edge.
 constexpr int kBarMarginPct = 8;
 constexpr int kTabGap = 10;
+// Landscape stacks four tabs down a 480/528 px edge instead of across it, so
+// the same 10 px gap costs height the stacked letters need. 6 px keeps the
+// tabs visually separate and buys the 5-letter labels (BOOKS) their pitch.
+constexpr int kTabGapV = 6;
+// Stacked-letter pitch = cap height + this. Measured from the font's own 'H',
+// never from lineAdvance (24 px against a 15 px cap — prose leading, far too
+// loose stacked). ONE pitch for every landscape label so the bar reads as one
+// system; a label too long to fit at this pitch is ABBREVIATED by the scene,
+// never crushed.
+constexpr int kStackGap = 3;
+// The longest label the fixed pitch can hold. Scenes must abbreviate past it
+// (SELECT -> OK); drawSoftKeyTabVertical tightens as a last resort and says so.
+constexpr int kStackMaxLetters = 5;
+// Arrow mark length. Portrait tabs are 28 px tall, so 20 is near the ceiling;
+// a landscape tab is ~100 px tall and 38 wide, where 20 looked lost — 26 fills
+// it without the head (2 * 26 * 5/12 = 21 px wide) touching the sides.
+constexpr int kArrowLen = 20;
+constexpr int kArrowLenV = 26;
+
+// The four arrow marks, drawn from primitives: a shaft plus a solid
+// triangular head. dir is a SoftKey:: sentinel byte (0x11..0x14).
+void drawArrow(Gfx& gfx, int cx, int cy, int len, char dir, bool ink) {
+  const bool horiz = (dir == '\x11' || dir == '\x12');
+  const bool toward0 = (dir == '\x11' || dir == '\x13');  // points at -x / -y
+  const int half = len / 2;
+  const int head = (len * 5) / 12;
+  constexpr int kShaft = 3;
+  if (horiz) gfx.fillRect(cx - half, cy - kShaft / 2, len, kShaft, ink);
+  else gfx.fillRect(cx - kShaft / 2, cy - half, kShaft, len, ink);
+  for (int i = 0; i < head; i++) {
+    // One row/column per step, widening away from the tip.
+    if (horiz) {
+      const int x = toward0 ? cx - half + i : cx + half - 1 - i;
+      gfx.fillRect(x, cy - i, 1, 2 * i + 1, ink);
+    } else {
+      const int y = toward0 ? cy - half + i : cy + half - 1 - i;
+      gfx.fillRect(cx - i, y, 2 * i + 1, 1, ink);
+    }
+  }
+}
 
 // Small settings gear from 1-bit primitives: eight teeth around a solid body
 // with a carved centre hole. Centred on (cx, cy); `ink` inverts for the
@@ -82,6 +122,8 @@ void drawSoftKeyTab(Gfx& gfx, int slot, const char* label, bool longPress, bool 
   const bool ink = !pressed;  // glyph colour: black on white, white on black
   if (isIcon) {
     drawGear(gfx, g.x + g.w / 2, g.y + kTabH / 2 + 1, 8, ink);
+  } else if (SoftKey::isArrow(label)) {
+    drawArrow(gfx, g.x + g.w / 2, g.y + kTabH / 2, kArrowLen, label[0], ink);
   } else if (label && label[0]) {
     const int textY = g.y + (kTabH - gfx.lineHeight(kFontSmall)) / 2 + 1;
     gfx.drawTextCentered(kFontSmall, g.x + g.w / 2, textY, label, ink);
@@ -94,14 +136,78 @@ void drawSoftKeyTab(Gfx& gfx, int slot, const char* label, bool longPress, bool 
   }
 }
 
+// Landscape: the four tabs run down the panel's button edge, and the label
+// reads DOWNWARD one letter per line ("D O W N" stacked) rather than lying on
+// its side — sideways words are legible in principle and unreadable at a
+// glance, which is the only kind of reading a button label gets.
+//
+// Slot 0 sits at the BOTTOM: rotating the panel maps the portrait bar's
+// leftmost key to the bottom of this edge, and the hardware does not move.
+void drawSoftKeyTabVertical(Gfx& gfx, int slot, const char* label, bool longPress, bool isIcon) {
+  const int w = gfx.width();
+  const int h = gfx.height();
+  const int colW = Scene::SOFTKEY_BAR_H - 6;
+  const int marginY = (h * kBarMarginPct) / 100;
+  const int slotH = (h - 2 * marginY - 3 * kTabGapV) / 4;
+  const int x = w - colW;
+  const int y = h - marginY - (slot + 1) * slotH - slot * kTabGapV;
+
+  gfx.fillRect(x, y, colW, slotH, false);
+  // Extend past the right edge so drawPixel clips it: only the LEFT corners
+  // round, mirroring how the portrait bar keeps only its top corners.
+  gfx.drawRoundedRect(x, y, colW + kTabRadius, slotH, kTabRadius, 1, true);
+
+  if (isIcon) {
+    drawGear(gfx, x + colW / 2, y + slotH / 2, 8, true);
+    return;
+  }
+  if (SoftKey::isArrow(label)) {
+    drawArrow(gfx, x + colW / 2, y + slotH / 2, kArrowLenV, label[0], true);
+    return;
+  }
+  if (!label || !label[0]) return;
+
+  // ONE pitch for every label in the bar, derived from the font's own cap
+  // height. A fixed pitch is what makes SELECT and GO look like the same
+  // system — the old code used lineHeight and then squeezed only the long
+  // labels, so every tab had its own spacing.
+  int n = 0;
+  for (const char* p = label; *p; p++) n++;
+  const int capH = gfx.capHeight(kFontSmall);
+  int pitch = capH + kStackGap;
+  // Ink runs from the first cap's top to the last cap's bottom — the trailing
+  // gap is not ink, so it must not be counted when centring.
+  const int avail = slotH - 8;
+  if ((n - 1) * pitch + capH > avail) {
+    // The scene should have abbreviated (kStackMaxLetters). Tighten to a hard
+    // floor rather than draw off the end, and say so on serial once seen.
+    pitch = n > 1 ? (avail - capH) / (n - 1) : capH;
+    if (pitch < capH + 1) pitch = capH + 1;
+    Serial.printf("[xphone-os] softkey: '%s' (%d) over %d letters — pitch %d\n", label, n,
+                  kStackMaxLetters, pitch);
+  }
+  int top = y + (slotH - ((n - 1) * pitch + capH)) / 2;  // top pixel of cap 1
+  const int capOff = gfx.capTopOffset(kFontSmall);
+  for (const char* p = label; *p; p++, top += pitch) {
+    const char one[2] = {*p, 0};
+    gfx.drawTextCentered(kFontSmall, x + colW / 2, top - capOff, one);
+  }
+  if (longPress) {
+    constexpr int kDot = 3;
+    gfx.fillRoundedRect(x + 4, y + (slotH - kDot) / 2, kDot, kDot, 1, true);
+  }
+}
+
 void drawSoftKeyBar(Gfx& gfx, const char* const* labels, const uint8_t longPressSlots,
                     const uint8_t iconMask) {
   if (!labels) return;
+  const bool landscape = gfx.orientation() == Gfx::Orient::Landscape;
   for (int i = 0; i < 4; i++) {
     const char* label = labels[i];
     const bool isIcon = iconMask & (1u << i);
     if (!isIcon && (!label || label[0] == '\0')) continue;  // hidden tab
-    drawSoftKeyTab(gfx, i, label, longPressSlots & (1u << i), isIcon, /*pressed=*/false);
+    if (landscape) drawSoftKeyTabVertical(gfx, i, label, longPressSlots & (1u << i), isIcon);
+    else drawSoftKeyTab(gfx, i, label, longPressSlots & (1u << i), isIcon, /*pressed=*/false);
   }
 }
 }  // namespace
@@ -123,6 +229,10 @@ void SceneManager::loop(Input& in, Gfx& gfx) {
 // (E2 press-invert feedback was tried and REMOVED: a release landing while the
 // press-flash was still mid-waveform skipped its restore — tabs stuck black.
 // The driver's displayWindowFlash stays available if a stateless use appears.)
+
+void SceneManager::renderNow() {
+  if (_flushGfx) renderIfDirty(*_flushGfx);
+}
 
 void SceneManager::switchTo(Scene& s) {
   if (_active == &s) return;
@@ -178,6 +288,9 @@ void SceneManager::renderIfDirty(Gfx& gfx) {
   // the partial paths stream their window rows from).
   gfx.clear();
   _active->render(gfx);
+  // The tabs sit against the PHYSICAL button edge in both orientations —
+  // rotating the panel does not move the buttons. drawSoftKeyBar picks the
+  // horizontal or vertical layout from the current orientation.
   drawSoftKeyBar(gfx, _active->softKeys(), _active->longPressSlots(), _active->softKeyIconMask());
   const unsigned long t1 = millis();
 

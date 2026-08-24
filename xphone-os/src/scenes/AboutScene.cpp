@@ -17,6 +17,30 @@
 #include "esp_heap_caps.h"
 #include "esp_system.h"
 
+
+// Diagnostic lines are assembled free-hand and several outgrow the panel
+// (the build stamp, time.sync, stack HWM). Chop to width with an ellipsis
+// instead of drawing off the right edge (audit 2026-08-18, A2).
+static void drawDiagRow(Gfx& gfx, const int x, const int y, const char* text) {
+  const int maxW = gfx.width() - 2 * x;
+  if (gfx.textWidth(kFontRegular, text) <= maxW) {
+    gfx.drawText(kFontRegular, x, y, text);
+    return;
+  }
+  char clipped[96];
+  snprintf(clipped, sizeof(clipped), "%s", text);
+  size_t len = strlen(clipped);
+  while (len > 0) {
+    clipped[--len] = '\0';
+    char probe[100];
+    snprintf(probe, sizeof(probe), "%s...", clipped);
+    if (gfx.textWidth(kFontRegular, probe) <= maxW) {
+      gfx.drawText(kFontRegular, x, y, probe);
+      return;
+    }
+  }
+}
+
 void AboutScene::handleInput(Input& in) {
   if (in.wasPressed(Btn::Back)) showLauncher();
 }
@@ -33,22 +57,27 @@ void AboutScene::render(Gfx& gfx) {
   gfx.fillRect(x, y - 6, gfx.width() - 2 * x, 2, true);
 
   snprintf(line, sizeof(line), "version: %s (built %s %s)", XPHONE_VERSION, __DATE__, __TIME__);
-  gfx.drawText(kFontRegular, x, y, line);
+  drawDiagRow(gfx, x, y, line);
+  y += gfx.lineHeight(kFontRegular) + 4;
+
+  // The exact build, for a bug report: git describe against the fw-v0.5 tag.
+  snprintf(line, sizeof(line), "build: %s", XPHONE_GIT_REV_STR);
+  drawDiagRow(gfx, x, y, line);
   y += gfx.lineHeight(kFontRegular) + 4;
 
   snprintf(line, sizeof(line), "panel: %s  %dx%d", BoardConfig::ACTIVE.name, gfx.width(), gfx.height());
-  gfx.drawText(kFontRegular, x, y, line);
+  drawDiagRow(gfx, x, y, line);
   y += gfx.lineHeight(kFontRegular) + 4;
 
   snprintf(line, sizeof(line), "boot to first paint: %lu ms", gBootTotalMs);
-  gfx.drawText(kFontRegular, x, y, line);
+  drawDiagRow(gfx, x, y, line);
   y += gfx.lineHeight(kFontRegular) + 4;
 
   // M4.2 wake diagnostic: reset reason + last-scene restore outcome, captured
   // once in boot(). Tells us whether the power-button wake is DEEPSLEEP (RTC
   // would survive) or POWERON (needs NVS), and whether a scene was restored.
   snprintf(line, sizeof(line), "wake: %s  restore: %s", gWakeResetReason, gWakeRestoreScene);
-  gfx.drawText(kFontRegular, x, y, line);
+  drawDiagRow(gfx, x, y, line);
   y += gfx.lineHeight(kFontRegular) + 4;
 
   // Phase 0 morning-meditation spec: wake→BLE-connect and wake→date latency
@@ -66,21 +95,21 @@ void AboutScene::render(Gfx& gfx) {
   } else {
     snprintf(line, sizeof(line), "time.sync: no connect since boot");
   }
-  gfx.drawText(kFontRegular, x, y, line);
+  drawDiagRow(gfx, x, y, line);
   y += gfx.lineHeight(kFontRegular) + 4;
 
   snprintf(line, sizeof(line), "heap free: %u B", static_cast<unsigned>(ESP.getFreeHeap()));
-  gfx.drawText(kFontRegular, x, y, line);
+  drawDiagRow(gfx, x, y, line);
   y += gfx.lineHeight(kFontRegular) + 4;
 
   snprintf(line, sizeof(line), "heap min free: %u B",
            static_cast<unsigned>(esp_get_minimum_free_heap_size()));
-  gfx.drawText(kFontRegular, x, y, line);
+  drawDiagRow(gfx, x, y, line);
   y += gfx.lineHeight(kFontRegular) + 4;
 
   snprintf(line, sizeof(line), "heap largest block: %u B",
            static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
-  gfx.drawText(kFontRegular, x, y, line);
+  drawDiagRow(gfx, x, y, line);
   y += gfx.lineHeight(kFontRegular) + 10;
 
   // --- M2.1a: refresh instrumentation — the LAST interaction before entering
@@ -91,16 +120,16 @@ void AboutScene::render(Gfx& gfx) {
   gfx.fillRect(x, y - 6, gfx.width() - 2 * x, 2, true);
 
   snprintf(line, sizeof(line), "last draw: %lu ms", gRefreshStats.drawMs);
-  gfx.drawText(kFontRegular, x, y, line);
+  drawDiagRow(gfx, x, y, line);
   y += gfx.lineHeight(kFontRegular) + 4;
 
   snprintf(line, sizeof(line), "last refresh: %lu ms (%s)", gRefreshStats.refreshMs, gRefreshStats.tier);
-  gfx.drawText(kFontRegular, x, y, line);
+  drawDiagRow(gfx, x, y, line);
   y += gfx.lineHeight(kFontRegular) + 4;
 
   snprintf(line, sizeof(line), "partials since scrub: %u  (HALF every %u)",
            static_cast<unsigned>(gRefreshStats.sinceScrub), static_cast<unsigned>(kScrubAfterRefreshes));
-  gfx.drawText(kFontRegular, x, y, line);
+  drawDiagRow(gfx, x, y, line);
   y += gfx.lineHeight(kFontRegular) + 10;
 
   // --- M2.1b: power instrumentation — About IS the meter readout for the
@@ -110,7 +139,7 @@ void AboutScene::render(Gfx& gfx) {
 
   snprintf(line, sizeof(line), "cpu: %lu MHz  uptime: %lu min",
            static_cast<unsigned long>(getCpuFrequencyMhz()), static_cast<unsigned long>(millis() / 60000UL));
-  gfx.drawText(kFontRegular, x, y, line);
+  drawDiagRow(gfx, x, y, line);
   y += gfx.lineHeight(kFontRegular) + 4;
 
   {
@@ -129,7 +158,7 @@ void AboutScene::render(Gfx& gfx) {
       snprintf(line, sizeof(line), "battery: unavailable");
     }
   }
-  gfx.drawText(kFontRegular, x, y, line);
+  drawDiagRow(gfx, x, y, line);
   y += gfx.lineHeight(kFontRegular) + 4;
 
   {
@@ -144,7 +173,7 @@ void AboutScene::render(Gfx& gfx) {
         BatteryGauge::readWord(BatteryGauge::kCmdFullChargeCapacity, fccMah) &&
         BatteryGauge::readWord(BatteryGauge::kCmdDesignCapacity, designMah)) {
       snprintf(line, sizeof(line), "gauge: %u/%u mAh  design %u mAh", remainMah, fccMah, designMah);
-      gfx.drawText(kFontRegular, x, y, line);
+      drawDiagRow(gfx, x, y, line);
       y += gfx.lineHeight(kFontRegular) + 4;
     }
   }
@@ -158,7 +187,7 @@ void AboutScene::render(Gfx& gfx) {
   } else {
     snprintf(line, sizeof(line), "adv: slow (400-500 ms)");
   }
-  gfx.drawText(kFontRegular, x, y, line);
+  drawDiagRow(gfx, x, y, line);
   y += gfx.lineHeight(kFontRegular) + 4;
 
   {
@@ -171,7 +200,7 @@ void AboutScene::render(Gfx& gfx) {
       snprintf(line, sizeof(line), "conn: none");
     }
   }
-  gfx.drawText(kFontRegular, x, y, line);
+  drawDiagRow(gfx, x, y, line);
   y += gfx.lineHeight(kFontRegular) + 10;
 
   // --- M2: companion BLE / ANCS snapshot (same e-ink discipline: sampled
@@ -185,7 +214,7 @@ void AboutScene::render(Gfx& gfx) {
   } else {
     snprintf(line, sizeof(line), "ble: advertising as %s", CompanionProtocol::deviceName());
   }
-  gfx.drawText(kFontRegular, x, y, line);
+  drawDiagRow(gfx, x, y, line);
   y += gfx.lineHeight(kFontRegular) + 4;
 
   char peer[18];
@@ -194,19 +223,19 @@ void AboutScene::render(Gfx& gfx) {
   } else {
     snprintf(line, sizeof(line), "peer: none since boot");
   }
-  gfx.drawText(kFontRegular, x, y, line);
+  drawDiagRow(gfx, x, y, line);
   y += gfx.lineHeight(kFontRegular) + 4;
 
   // ANCS status snapshot (fixed-buffer copy under the client's state mutex).
   char ancsStatus[48];
   COMPANION_ANCS.getStatusMessage(ancsStatus, sizeof(ancsStatus));
   snprintf(line, sizeof(line), "ancs: %s", ancsStatus);
-  gfx.drawText(kFontRegular, x, y, line);
+  drawDiagRow(gfx, x, y, line);
   y += gfx.lineHeight(kFontRegular) + 4;
 
   snprintf(line, sizeof(line), "notifications stored: %u",
            static_cast<unsigned>(NOTIFICATION_STORE.count()));
-  gfx.drawText(kFontRegular, x, y, line);
+  drawDiagRow(gfx, x, y, line);
   y += gfx.lineHeight(kFontRegular) + 4;
 
   // M2.1d: stack + ANCS-queue audit on glass, so hardware validation needs
@@ -225,7 +254,7 @@ void AboutScene::render(Gfx& gfx) {
                static_cast<unsigned long>(COMPANION_ANCS.getQueueDropCount()));
     }
   }
-  gfx.drawText(kFontRegular, x, y, line);
+  drawDiagRow(gfx, x, y, line);
   y += gfx.lineHeight(kFontRegular) + 4;
 
 #if XP_AUTO_SLEEP_MS > 0
@@ -234,6 +263,6 @@ void AboutScene::render(Gfx& gfx) {
 #else
   snprintf(line, sizeof(line), "Press power to sleep, hold 3s to restart");
 #endif
-  gfx.drawText(kFontRegular, x, y, line);
+  drawDiagRow(gfx, x, y, line);
   // M2.1: footer hint replaced by the SceneManager soft-key bar (default BACK tab).
 }

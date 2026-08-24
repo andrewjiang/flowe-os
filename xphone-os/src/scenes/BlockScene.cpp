@@ -177,7 +177,7 @@ const char* const* BlockScene::softKeys() const {
   // now"), exactly CrossPoint's flow. BREAK stays on the same physical
   // button (front-LEFT, slot 2) the user already knows as MODE when idle.
   static constexpr const char* kMainActive[4] = {"BACK", nullptr, "BREAK", nullptr};
-  static constexpr const char* kList[4] = {"BACK", "SELECT", "UP", "DOWN"};
+  static constexpr const char* kList[4] = {"BACK", "SELECT", SoftKey::Left, SoftKey::Right};
   if (_view == View::Main) return _activeCache ? kMainActive : kMainReady;
   return kList;
 }

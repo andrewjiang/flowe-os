@@ -11,7 +11,7 @@ constexpr int XPhoneIconAppCount = 6;
 constexpr int XPhoneIconPackCount = 5;
 
 constexpr const char* XPhoneIconPackNames[XPhoneIconPackCount] = {
-    "Current",
+    "Classic",
     "Stamp",
     "Cutout",
     "Etched",

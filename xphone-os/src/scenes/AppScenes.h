@@ -5,9 +5,17 @@
 // The scene instances live as statics in AppScenes.cpp; these helpers are
 // how scenes navigate without including each other's headers.
 
+#include <cstddef>
 #include <cstdint>
 
-constexpr const char* XPHONE_VERSION = "0.5.0";
+// Shown in Settings and About. XPHONE_VERSION is the human-facing series;
+// XPHONE_GIT_REV is the exact build (git describe), so a bug report names
+// one commit instead of a marketing number nobody remembered to bump. Both
+// come from include/generated/xphone_version.h, rewritten before every
+// build by tools/gen_version.py.
+#include "generated/xphone_version.h"
+constexpr const char* XPHONE_VERSION = XPHONE_MARKETING;
+constexpr const char* XPHONE_GIT_REV_STR = XPHONE_GIT_REV;
 
 // M4.2 last-scene restore: a stable id for each restorable scene. Persisted in
 // RTC memory at sleep (Sleep.cpp) and dispatched by boot() on wake so the
@@ -41,6 +49,7 @@ const char* sceneName(SceneId id);
 
 void showLauncher();
 void showAbout();
+void readerShelfDump();
 void showNotifications();
 void showSettings();    // M3: real Settings scene (SD update / restart / about)
 void showBlock();       // M3: real Block scene (Screen Time shields via BLE)
@@ -51,9 +60,19 @@ void showReader();      // R1 EPUB reader (resumes the last book; book list on B
 void showWorkout();     // Workout: set-by-set exercise tracker synced from iPhone
 void showFileTransfer();           // R2: Wi-Fi File Transfer scene (Idle menu)
 void showFileTransferAutoStart();  // R2: same, but bring Wi-Fi up immediately (BLE transfer.start)
+void showFileTransferAutoStartDirect();
+// A transfer card while the scene is already up: behave like a fresh entry.
+void fileTransferRestartFromCard(bool direct);  // W2: raise the device's own hotspot (BLE transfer.direct)
 // R2: BLE "transfer.stop" — ack + restart when the transfer scene is active
 // (restart is the clean Wi-Fi teardown); no-op on any other scene.
 void stopFileTransferIfActive();
+
+// Bench dev console ("where"): current launcher grid index (0-based,
+// row-major, COLS=2 — Today/Notif, Prio/Block, Read/Workout).
+int launcherSelection();
+
+// Bench dev console ("where" v2): Reader sub-state one-liner.
+void readerWhere(char* out, size_t n);
 
 // M2: main.cpp marshals BLE/ANCS events to redraws with these — a scene is
 // only marked dirty when it is the one on glass (e-ink discipline: a

@@ -26,7 +26,11 @@
 #include <freertos/task.h>
 
 #include "BatteryGauge.h"
+#include "net/WifiCreds.h"
+#include <Preferences.h>
+#include "BenchGlass.h"
 #include "BlockStatusStore.h"
+#include "ClockStore.h"
 #include "CompanionSync.h"
 #include "Fonts.h"
 #include "Gfx.h"
@@ -40,9 +44,11 @@
 #include "Sleep.h"
 #include "ble/CompanionAncsClient.h"
 #include "ble/CompanionBleService.h"
+#include "reader/FbpBook.h"
 #include "art/FloweLogo.h"
 #include "esp_heap_caps.h"
 #include "esp_system.h"
+#include "soc/usb_serial_jtag_struct.h"
 #include "scenes/AppScenes.h"
 
 // Constructor pins are legacy and unused — EInkDisplay::begin() reads the
@@ -53,6 +59,9 @@ static EInkDisplay display(BoardConfig::DEFAULT_DEVICE.display.sclk, BoardConfig
                            BoardConfig::DEFAULT_DEVICE.display.rst, BoardConfig::DEFAULT_DEVICE.display.busy);
 
 static Gfx gfx(display);
+// The one Gfx. Exposed so a scene's onExit() — which gets no Gfx — can put
+// the panel back to portrait before the next scene lays out for it.
+Gfx* G_GFX = &gfx;
 static Input input;
 
 // M2.1b (power lever 3): XP_CPU_MHZ (default 80) now lives in CpuBoost.h,
@@ -496,11 +505,67 @@ static void pumpCompanionEvents() {
   if (COMPANION_BLE.consumeShelfRequest()) {
     COMPANION_BLE.sendReaderShelf();
   }
+  if (COMPANION_BLE.consumeProgressRequest()) {
+    COMPANION_BLE.sendReaderProgress();
+  }
+  if (COMPANION_BLE.consumeWifiKnownRequest()) {
+    COMPANION_BLE.sendWifiKnown();
+  }
+  COMPANION_BLE.pumpReaderPlace();  // item 6 step 3: send our place once the link is back
+  {
+    // Item 6: a place pushed from a phone. Write the matching book's .pos so
+    // the next open resumes there. The reader suspends BLE while open, so a
+    // push never lands mid-read — a plain .pos write is the whole job.
+    CompanionBleService::PlacePush pp;
+    if (COMPANION_BLE.consumePlacePush(pp)) {
+      char path[160];
+      if (reader::FbpBook::findByKey(pp.key, path, sizeof(path))) {
+        reader::FbpBook::savePos(path, static_cast<uint16_t>(pp.page),
+                                 static_cast<uint16_t>(pp.pageCount));
+        Serial.printf("[xphone-os] place: %s -> page %lu/%lu (%s)\n", pp.key,
+                      static_cast<unsigned long>(pp.page),
+                      static_cast<unsigned long>(pp.pageCount), path);
+      } else {
+        Serial.printf("[xphone-os] place: no book matches key '%s'\n", pp.key);
+      }
+    }
+  }
+  static uint32_t sNeedsWifiEchoAtMs = 0;
+  if (sNeedsWifiEchoAtMs && millis() >= sNeedsWifiEchoAtMs) {
+    sNeedsWifiEchoAtMs = 0;
+    COMPANION_BLE.sendTransferStatus("needs-wifi");
+  }
   switch (COMPANION_BLE.consumeTransferRequest()) {
     case CompanionBleService::TransferRequest::Start:
+      // No saved network: answer over BLE from WHEREVER we are — launcher,
+      // reader, anywhere. The screen is not a participant in this protocol;
+      // entering it just to say "needs-wifi" is how a reader ended up
+      // parked on a dead-end screen eating every later start request
+      // (found live, 2026-08-23).
+      if (WifiCreds::count() == 0) {
+        Serial.println("[xphone-os] transfer: start requested, no Wi-Fi saved -> needs-wifi (no scene change)");
+        COMPANION_BLE.sendTransferStatus("needs-wifi");
+        // The first answer races the on-connect flood (shelf, progress,
+        // wifi.known chunks share the pipe) and notify() cannot report a
+        // drop — the pinned framework returns void. Echo once after the
+        // flood drains. The phone ignores a duplicate.
+        sNeedsWifiEchoAtMs = millis() + 1500;
+        break;
+      }
+      Serial.println("[xphone-os] transfer: phone requested start");
       if (gCurrentSceneId != SceneId::FileTransfer) {
-        Serial.println("[xphone-os] transfer: phone requested start");
         showFileTransferAutoStart();
+      } else {
+        // Same card, scene already up: behave exactly like a fresh entry.
+        fileTransferRestartFromCard(/*direct=*/false);
+      }
+      break;
+    case CompanionBleService::TransferRequest::StartDirect:
+      Serial.println("[xphone-os] transfer: phone requested DIRECT start");
+      if (gCurrentSceneId != SceneId::FileTransfer) {
+        showFileTransferAutoStartDirect();
+      } else {
+        fileTransferRestartFromCard(/*direct=*/true);
       }
       break;
     case CompanionBleService::TransferRequest::Stop:
@@ -585,6 +650,25 @@ static void checkPowerButton() {
 //   * SD flash — needs no check here: both sd_update paths (boot
 //     checkAndApply, Settings-scene flashFromPath) run synchronously inside
 //     a single loop tick, so this function can never interleave with one.
+// Bench-hold USB host detection (see checkAutoSleep). A host issues SOF
+// frames ~every 1 ms; the C3's USB Serial/JTAG peripheral counts them even
+// when no program has the port open. If the counter moved in the last
+// second, a computer is on the line.
+static bool gUsbHoldLogged = false;
+static bool usbHostConnected() {
+  static uint32_t lastFrame = 0;
+  static uint32_t lastSampleMs = 0;
+  static bool connected = false;
+  const uint32_t now = millis();
+  if (now - lastSampleMs >= 1000) {
+    const uint32_t frame = USB_SERIAL_JTAG.fram_num.sof_frame_index;
+    connected = (frame != lastFrame);
+    lastFrame = frame;
+    lastSampleMs = now;
+  }
+  return connected;
+}
+
 static void checkAutoSleep() {
 #if XP_AUTO_SLEEP_MS > 0
   static unsigned long lastInputMs = 0;
@@ -596,6 +680,21 @@ static void checkAutoSleep() {
   // TCP connection under the phone. The scene pins the deadline instead of
   // being exempted outright so the normal window resumes the moment it exits.
   if (gCurrentSceneId == SceneId::FileTransfer) lastInputMs = now;
+
+  // Bench hold: while a USB HOST is attached, never auto-sleep. A computer
+  // polls the bus every millisecond, which advances the hardware USB frame
+  // counter; a wall charger never polls, so battery/charger users keep the
+  // normal windows. Sampled once per second; unplugging restarts the idle
+  // window from that moment.
+  if (usbHostConnected()) {
+    lastInputMs = now;
+    if (!gUsbHoldLogged) {
+      Serial.println("[xphone-os] auto-sleep held: USB host attached");
+      gUsbHoldLogged = true;
+    }
+  } else {
+    gUsbHoldLogged = false;
+  }
 
   const bool blockActive = BLOCK_STATUS.active();
   const unsigned long timeout =
@@ -641,7 +740,207 @@ static void reportRuntimeStats() {
                 static_cast<unsigned long>(COMPANION_ANCS.getQueueDropCount()));
 }
 
+// Bench dev console: while a USB host is attached, one-line serial commands
+// inject synthetic button presses, so the bench drives the UI without hands.
+//   btn <name>        — tap (name: up/down/left/right/prev/next/confirm/
+//                       open/size/back/books)
+//   btn <name> long   — long-press ("hold" also accepted); with taps this
+//                       covers the entire input vocabulary, since scenes only
+//                       consume the two one-shot edges (long-back = home,
+//                       long-confirm = notification actions, ...)
+//   reboot            — the power-button 2.5s-hold restart, minus the button
+//   sleep             — REFUSED, loudly: deep sleep powers the USB port off
+//                       and nothing can wake the device remotely; the bench
+//                       must never be able to saw off the branch it sits on
+// Unknown input is ignored silently (boot noise, other tools on the port).
+static void pumpDevConsole() {
+  if (!usbHostConnected()) return;
+  static char line[32];
+  static uint8_t len = 0;
+  while (Serial.available() > 0) {
+    const char c = (char)Serial.read();
+    if (c != '\n' && c != '\r') {
+      if (len < sizeof(line) - 1) line[len++] = c;
+      continue;
+    }
+    line[len] = 0;
+    const uint8_t had = len;
+    len = 0;
+    if (had == 0) continue;
+    // Bench: set the device clock without the phone. The hardware has no
+    // RTC and the date arrives over BLE, so every date-dependent screen
+    // (streaks, the month strip, "today") was unverifiable on the bench
+    // whenever the app was not connected. Usage: clock 20260816 845
+    if (!strncmp(line, "clock ", 6)) {
+      unsigned long ymd = 0;
+      unsigned long minutes = 0;
+      if (sscanf(line + 6, "%lu %lu", &ymd, &minutes) == 2 && ymd > 19000000UL &&
+          ymd < 30000000UL && minutes < 1440UL) {
+        CLOCK_STORE.day = static_cast<uint32_t>(ymd);
+        CLOCK_STORE.minutesIntoDay = static_cast<uint16_t>(minutes);
+        CLOCK_STORE.firstSyncMs = millis();
+        if (CLOCK_STORE.firstConnectMs == 0) CLOCK_STORE.firstConnectMs = millis();
+        Serial.printf("[xphone-os] devcon: clock set day=%lu min=%lu\n", ymd, minutes);
+        if (SCENES.active()) SCENES.active()->markDirty();
+      } else {
+        Serial.println("[xphone-os] devcon: clock needs <yyyymmdd> <minutes-into-day>");
+      }
+      continue;
+    }
+    if (!strcmp(line, "progress")) {
+      // Send reading progress + stats over BLE now, without waiting for the
+      // phone to ask. Lets the bench prove the chunking and the payload before
+      // either app knows how to request it.
+      COMPANION_BLE.sendReaderProgress();
+      Serial.println("[xphone-os] devcon: progress sent");
+      return;
+    }
+    if (!strcmp(line, "shelfdump")) {
+      readerShelfDump();
+      continue;
+    }
+    if (!strcmp(line, "failnote")) {
+      // Bench-only: plant a transfer failure exactly as the radio-down path
+      // does, so the carry-across-reboot announcement can be proven without
+      // poisoning real credentials. Follow with "reboot", then watch for
+      // "Transfer status sent state=failed" on the next encrypted connect.
+      Preferences pf;
+      if (pf.begin("transfer", /*readOnly=*/false)) {
+        pf.putString("lastFail", "Bench-injected failure");
+        pf.end();
+        Serial.println("[xphone-os] devcon: failure note planted");
+      }
+      continue;
+    }
+    if (!strncmp(line, "placepush ", 10)) {
+      // Bench: placepush <key> <page> <count> — inject a place through the
+      // same latch the reader.place card uses, proving write+resume without
+      // the app's sender (step 4).
+      char key[64] = {0};
+      unsigned page = 0, count = 0;
+      if (sscanf(line + 10, "%63s %u %u", key, &page, &count) >= 2) {
+        COMPANION_BLE.benchInjectPlace(key, page, count);
+        Serial.printf("[xphone-os] devcon: place injected key=%s page=%u count=%u\n",
+                      key, page, count);
+      } else {
+        Serial.println("[xphone-os] devcon: usage: placepush <key> <page> <count>");
+      }
+      continue;
+    }
+    if (!strcmp(line, "wificlear")) {
+      // Bench-only: forget every saved network, bonds untouched. Exists to
+      // reproduce the fresh-device "needs-wifi" path without an NVS erase,
+      // which would also take the pairing keys and start THAT saga again.
+      WifiCreds::clear();
+      Serial.println("[xphone-os] devcon: wifi credentials cleared");
+      continue;
+    }
+    if (!strcmp(line, "where")) {
+      // Fact-based remote navigation: what scene is on glass, and where
+      // the launcher selection sits (a wrong mental model of the grid
+      // once started a real Block session from the bench).
+      static constexpr const char* kSceneNames[] = {
+          "launcher", "notifications", "settings",  "block",   "priorities",
+          "today",    "about",         "reader",    "workout", "transfer"};
+      const uint32_t id = static_cast<uint32_t>(gCurrentSceneId);
+      char detail[96] = {0};
+      if (gCurrentSceneId == SceneId::Reader) readerWhere(detail, sizeof(detail));
+      Serial.printf("[xphone-os] devcon: where scene=%s launcherSel=%d%s%s\n",
+                    id < sizeof(kSceneNames) / sizeof(kSceneNames[0]) ? kSceneNames[id] : "?",
+                    launcherSelection(), detail[0] ? " reader=" : "", detail);
+      continue;
+    }
+    if (!strcmp(line, "fb")) {
+      // glass-twin: the exact pixels the firmware believes are on glass.
+      // Wait for the flush worker first — mid-flush the framebuffer is a
+      // truthful frame, but the panel is not showing it yet, and a camera
+      // diff taken against it would report a false mismatch.
+      SCENES.waitFlushIdle();
+      bench::dumpFrameBuffer(gfx);
+      continue;
+    }
+    if (!strncmp(line, "cal", 3) && (line[3] == 0 || line[3] == ' ')) {
+      // Camera calibration target. Drawn straight into the framebuffer,
+      // outside the scene manager, so it is not tied to any scene's layout.
+      // `redraw` puts the real UI back.
+      const char* name = (line[3] == ' ') ? line + 4 : "frame";
+      SCENES.waitFlushIdle();
+      if (!bench::drawCalPattern(gfx, name)) {
+        Serial.printf("[xphone-os] devcon: cal unknown pattern '%s' "
+                      "(frame|grid|checker|selftest|proof|bars|white|black)\n",
+                      name);
+        // The framebuffer is untouched on an unknown name, so nothing to undo.
+        continue;
+      }
+      gfx.flush(EInkDisplay::FULL_REFRESH);
+      Serial.printf("[xphone-os] devcon: cal %s (%dx%d) — run 'redraw' to restore the UI\n", name, gfx.width(),
+                    gfx.height());
+      continue;
+    }
+    if (!strcmp(line, "redraw")) {
+      // Force a clean full repaint of the live scene (after `cal`, or to make
+      // a capture reproducible without rebooting). The white FULL flush first
+      // is what makes it clean: panel RAM holds the calibration pattern, and
+      // the scene's own repaint is only a FAST differential against it.
+      SCENES.waitFlushIdle();
+      gfx.clear();
+      gfx.flush(EInkDisplay::FULL_REFRESH);
+      if (Scene* s = SCENES.active()) s->markDirty();
+      Serial.println("[xphone-os] devcon: redraw");
+      continue;
+    }
+    if (!strcmp(line, "sleep")) {
+      Serial.println("[xphone-os] devcon: sleep REFUSED (USB host attached; deep sleep would drop the link for good)");
+      continue;
+    }
+    if (!strcmp(line, "direct")) {
+      // Bench trigger for W2 Direct mode (normally BLE "transfer.direct").
+      Serial.println("[xphone-os] devcon: direct");
+      showFileTransferAutoStartDirect();
+      continue;
+    }
+    if (!strcmp(line, "sta")) {
+      // Bench trigger for a normal Wi-Fi session (normally BLE
+      // "transfer.start"): joins the saved network, serves HTTP with no
+      // session token, so the bench Mac can curl it. (2026-08-18)
+      Serial.println("[xphone-os] devcon: sta");
+      showFileTransferAutoStart();
+      continue;
+    }
+    if (!strcmp(line, "reboot")) {
+      Serial.println("[xphone-os] devcon: reboot");
+      SCENES.waitFlushIdle();  // same teardown as the power-hold restart
+      input.suspendTask();
+      gfx.clear();
+      gfx.drawTextCentered(kFontRegular, gfx.width() / 2, gfx.height() / 2, "Restarting...");
+      gfx.flush(EInkDisplay::FULL_REFRESH);
+      esp_restart();
+    }
+    if (had <= 4 || strncmp(line, "btn ", 4) != 0) continue;
+    char* n = line + 4;
+    bool lng = false;
+    if (char* sp = strchr(n, ' ')) {  // optional modifier after the name
+      *sp = 0;
+      const char* mod = sp + 1;
+      if (strcmp(mod, "long") == 0 || strcmp(mod, "hold") == 0) lng = true;
+      else continue;
+    }
+    Btn b;
+    if (!strcmp(n, "up")) b = Btn::Up;
+    else if (!strcmp(n, "down")) b = Btn::Down;
+    else if (!strcmp(n, "left") || !strcmp(n, "prev")) b = Btn::Left;
+    else if (!strcmp(n, "right") || !strcmp(n, "next")) b = Btn::Right;
+    else if (!strcmp(n, "confirm") || !strcmp(n, "open") || !strcmp(n, "size")) b = Btn::Confirm;
+    else if (!strcmp(n, "back") || !strcmp(n, "books")) b = Btn::Back;
+    else continue;
+    if (lng) input.injectLong(b);
+    else input.injectTap(b);
+    Serial.printf("[xphone-os] devcon: btn %s%s\n", n, lng ? " long" : "");
+  }
+}
+
 void loop() {
+  pumpDevConsole();         // bench-only: serial "btn X" -> synthetic taps
   input.update();           // debounced button edges (SDK InputManager)
   checkPowerButton();       // press+release -> deep sleep; hold ~2.5s -> restart
   checkAutoSleep();         // M4: idle -> deep sleep (2 min window while a block is active)

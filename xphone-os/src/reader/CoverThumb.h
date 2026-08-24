@@ -59,7 +59,13 @@ class CoverThumb {
   // Blit a thumb file at (x, y) logical coordinates. Streams one packed row
   // at a time through a stack buffer (no heap) — safe in render paths. Only
   // ink (set) bits are drawn. Optionally reports the thumb's dimensions.
-  static bool draw(Gfx& gfx, const char* binPath, int x, int y, int* outW = nullptr, int* outH = nullptr);
+  // clipX0/clipX1 bound the columns actually stamped (half-open, logical
+  // coords). Default is unbounded. The shelf needs it because a shaped
+  // title strip is a fixed-width bitmap: an Arabic title wider than its
+  // tile has no ellipsis to fall back on and would otherwise bleed into
+  // the neighbouring tile.
+  static bool draw(Gfx& gfx, const char* binPath, int x, int y, int* outW = nullptr,
+                   int* outH = nullptr, int clipX0 = -32768, int clipX1 = 32767);
 };
 
 }  // namespace reader

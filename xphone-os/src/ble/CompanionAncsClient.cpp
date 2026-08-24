@@ -297,10 +297,37 @@ void normalizeAsciiInPlace(char* s) {
 // the real iOS name and for apps that report an empty display name.
 void prettifyBundle(const char* bundleId, char* out, std::size_t outSize) {
   if (outSize == 0) return;
+  // Apple's system apps carry internal bundle segments ("mobilecal") that
+  // GetAppAttributes often never resolves — iOS omits display names for its
+  // own apps. Map the ones an owner actually sees.
+  static const struct { const char* bundle; const char* name; } kApple[] = {
+      {"com.apple.mobilecal", "Calendar"},
+      {"com.apple.MobileSMS", "Messages"},
+      {"com.apple.Preferences", "Settings"},
+      {"com.apple.mobilemail", "Mail"},
+      {"com.apple.mobilephone", "Phone"},
+      {"com.apple.mobilesafari", "Safari"},
+      {"com.apple.mobileslideshow", "Photos"},
+      {"com.apple.Passbook", "Wallet"},
+      {"com.apple.facetime", "FaceTime"},
+      {"com.apple.reminders", "Reminders"},
+      {"com.apple.AppStore", "App Store"},
+  };
+  if (bundleId) {
+    for (const auto& row : kApple) {
+      if (std::strcmp(bundleId, row.bundle) == 0) {
+        std::snprintf(out, outSize, "%s", row.name);
+        return;
+      }
+    }
+  }
   const char* seg = (bundleId && bundleId[0]) ? bundleId : "app";
   const char* dot = std::strrchr(seg, '.');
   if (dot && dot[1] != '\0') seg = dot + 1;
   std::snprintf(out, outSize, "%s", seg);
+  // "signal" and "ring" read as words, not names. Capitalize the fallback —
+  // the resolved iOS display name still replaces it when it arrives.
+  if (out[0] >= 'a' && out[0] <= 'z') out[0] = static_cast<char>(out[0] - 'a' + 'A');
 }
 
 // ANCS AttributeDate is compact ISO 8601 "YYYYMMDD'T'HHMMSS" (e.g. the
@@ -420,6 +447,7 @@ int serviceDiscoveryCallback(uint16_t connHandle, const ble_gatt_error* error, c
   }
 
   if (error->status == BLE_HS_EDONE) {
+    client->handleServiceDiscoveryComplete();
     return 0;
   }
 
@@ -813,20 +841,32 @@ void CompanionAncsClient::maybeKickDiscovery() {
   if (!want || handle == NO_CONN_HANDLE || ready || !COMPANION_BLE.isConnected()) {
     notReadySinceMs = 0;  // disarm; reset the cap once ready or disconnected
     if (ready || handle == NO_CONN_HANDLE) discoveryKicks = 0;
+    if (handle == NO_CONN_HANDLE) emptyWalks = 0;  // a new connect earns a fresh look
     return;
   }
+  // Three completed walks found no ANCS: this central has none to offer
+  // (an Android companion). Park quietly until the next connect.
+  if (emptyWalks >= 3) return;
   const uint32_t now = millis();
   if (notReadySinceMs == 0) {
     notReadySinceMs = now;
     return;
   }
-  const uint32_t limit = disc ? 12000u : 4000u;  // in-flight discovery gets longer
+  // Back off instead of hammering, and NEVER stop while the link is up
+  // (Andrew, 2026-08-17). The old policy was a flat 4 s times five: it gave up
+  // roughly a minute into a connection that then stayed open for hours, so a
+  // phone that was merely busy at connect time — waking, re-bonding — left the
+  // device connected and deaf for the rest of the session, recoverable only by
+  // cycling Bluetooth. Once a minute forever costs nothing next to holding the
+  // link open at all.
+  uint32_t limit = discoveryKicks >= 4 ? 60000u : (4000u << discoveryKicks);
+  if (disc && limit < 12000u) limit = 12000u;  // a real in-flight walk gets room
   if (now - notReadySinceMs < limit) return;
-  if (discoveryKicks >= 5) return;  // give up this connection; next connect resets
-  ++discoveryKicks;
+  if (discoveryKicks < 250) ++discoveryKicks;  // saturate; the delay is capped anyway
   notReadySinceMs = now;
-  LOG_INF("ANCS", "watchdog: not ready (%s); kicking discovery, attempt %u",
-          disc ? "discovery stuck" : "never started", static_cast<unsigned>(discoveryKicks));
+  LOG_INF("ANCS", "watchdog: not ready (%s); kicking discovery, attempt %u, next in %lus",
+          disc ? "discovery stuck" : "never started", static_cast<unsigned>(discoveryKicks),
+          static_cast<unsigned long>((discoveryKicks >= 4 ? 60000u : (4000u << discoveryKicks)) / 1000u));
   startDiscovery(handle);
 }
 
@@ -860,6 +900,37 @@ void CompanionAncsClient::handleServiceDiscovered(uint16_t startHandle, uint16_t
   ++revision;
   xSemaphoreGive(stateMutex);
   discoverCharacteristics();
+}
+
+// The service walk ended. iOS sends EDONE both after handing us the service
+// and after handing us nothing, so the two cases are told apart by whether
+// handleServiceDiscovered already recorded a start handle. Only the empty walk
+// is a failure, and only it clears `discovering`.
+//
+// This used to be a bare `return 0`, which left `discovering` latched true.
+// The watchdog then read that as "a request is still in flight", waited its
+// longer 12 s window instead of 4 s, and logged "discovery stuck" when the
+// truth was "never started" — slower recovery, and a log that misdirects
+// whoever reads it next.
+void CompanionAncsClient::handleServiceDiscoveryComplete() {
+  ensureMutex();
+  xSemaphoreTake(stateMutex, portMAX_DELAY);
+  const bool found = serviceStartHandle != 0;
+  if (!found) {
+    discovering = false;
+    ++revision;
+    if (emptyWalks < 250) ++emptyWalks;
+  } else {
+    emptyWalks = 0;
+  }
+  xSemaphoreGive(stateMutex);
+  if (!found) {
+    LOG_INF("ANCS", "service walk ended with no ANCS service (%u/3)%s",
+            static_cast<unsigned>(emptyWalks),
+            emptyWalks >= 3 ? "; parking until reconnect" : "; watchdog will retry");
+    COMPANION_BLE.updateStatus(emptyWalks >= 3 ? "Notifications need an iPhone"
+                                               : "ANCS service not offered");
+  }
 }
 
 void CompanionAncsClient::handleCharacteristicDiscovered(const ble_uuid_t* uuid, uint16_t valueHandle) {
@@ -1662,6 +1733,26 @@ void CompanionAncsClient::noteAppSeen(const char* bundleId) {
   e.notifCount = 1;
 }
 
+// Main-loop context (CompanionBleService card parse). Companion-supplied
+// app name for a phone-pushed notification. noteAppSeen() handles the
+// insert/tally (with the prettified fallback when `name` is empty); a
+// non-empty name overrides the entry and marks it resolved so the ANCS
+// GetAppAttributes pump never touches it.
+void CompanionAncsClient::seedAppName(const char* bundleId, const char* name) {
+  if (!bundleId || !bundleId[0]) return;
+  noteAppSeen(bundleId);
+  if (!name || !name[0]) return;
+  AppNameEntry* e = findAppEntry(bundleId);
+  if (!e) return;
+  char clipped[APP_NAME_CHARS];
+  std::snprintf(clipped, sizeof(clipped), "%s", name);
+  if (e->state != 2 || std::strcmp(e->name, clipped) != 0) {
+    std::memcpy(e->name, clipped, sizeof(clipped));
+    e->state = 2;  // resolved: never fetched over ANCS
+    ++appNameRevision;  // repaint list rows showing the fallback name
+  }
+}
+
 // Main-loop context (Notifications scene render). Cache hit -> the iOS display
 // name; miss -> the prettified bundle. Never triggers a fetch (ingest does).
 void CompanionAncsClient::appDisplayName(const char* bundleId, char* out, std::size_t outSize) const {
@@ -1702,7 +1793,52 @@ int CompanionAncsClient::handleGapEvent(ble_gap_event* event) {
   // once so the main loop can report its stack high-water mark.
   if (!hostTaskHandle) hostTaskHandle = xTaskGetCurrentTaskHandle();
 
-  if (!event || event->type != BLE_GAP_EVENT_NOTIFY_RX) return 0;
+  if (!event) return 0;
+
+  // HALF A BOND, THE DEVICE'S HALF. When this device still holds keys for a
+  // peer whose phone lost its own half (app data cleared, phone replaced),
+  // the peer's fresh pairing lands as REPEAT_PAIRING. Unhandled, NimBLE
+  // refuses it — the peer sees "Pairing Failed", retries, and the two loop
+  // forever with a system dialog per round (Moto vs X3, 2026-08-22, every
+  // 35 seconds for half an hour). The stale keys are worthless: the peer
+  // that owned them is gone. Delete them and let the fresh pairing run.
+  if (event->type == BLE_GAP_EVENT_REPEAT_PAIRING) {
+    ble_gap_conn_desc desc;
+    if (ble_gap_conn_find(event->repeat_pairing.conn_handle, &desc) == 0) {
+      ble_store_util_delete_peer(&desc.peer_id_addr);
+      LOG_INF("X4CMP", "repeat pairing conn=%u: stale bond deleted, retrying fresh",
+              event->repeat_pairing.conn_handle);
+    }
+    return BLE_GAP_REPEAT_PAIRING_RETRY;
+  }
+
+  // The framework callback swallows the encryption-failure reason; log it
+  // here so a failed pairing names its cause in the serial without a
+  // phone-side HCI capture (which stock Android would not give us anyway).
+  if (event->type == BLE_GAP_EVENT_CONNECT && event->connect.status == 0) {
+    COMPANION_BLE.noteConnHandle(event->connect.conn_handle);
+  }
+  if (event->type == BLE_GAP_EVENT_SUBSCRIBE) {
+    // Diagnostic (2026-08-23): connections that receive ZERO notifications
+    // while the phone says "Listening". Does the subscribe ever reach us?
+    LOG_INF("ANCS", "SUBSCRIBE conn=%u attr=%u notify %d->%d reason=%d",
+            event->subscribe.conn_handle, event->subscribe.attr_handle,
+            event->subscribe.prev_notify, event->subscribe.cur_notify,
+            event->subscribe.reason);
+    COMPANION_BLE.noteActionSubscribe(event->subscribe.conn_handle,
+                                      event->subscribe.attr_handle,
+                                      event->subscribe.cur_notify);
+    return 0;
+  }
+  if (event->type == BLE_GAP_EVENT_ENC_CHANGE) {
+    if (event->enc_change.status != 0) {
+      LOG_ERR("X4CMP", "ENC_CHANGE conn=%u status=%d (SMP/HCI reason)",
+              event->enc_change.conn_handle, event->enc_change.status);
+    }
+    return 0;
+  }
+
+  if (event->type != BLE_GAP_EVENT_NOTIFY_RX) return 0;
 
   uint16_t sourceHandle = 0;
   uint16_t dataHandle = 0;

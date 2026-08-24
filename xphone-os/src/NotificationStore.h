@@ -30,6 +30,12 @@ class NotificationStore {
   static constexpr std::size_t TITLE_CHARS = 56;
   static constexpr std::size_t MESSAGE_CHARS = 112;
   static constexpr uint32_t RESTORED_UID_BIT = 0x40000000u;
+  // Synthetic UIDs for phone-pushed notifications (companion "notif.push"
+  // card — Android has no ANCS). Distinct from RESTORED_UID_BIT so a pushed
+  // entry can never collide with a live ANCS UID or a restored one; after a
+  // sleep/wake restore the two bits compose (0x20000001 -> 0x60000001), which
+  // stays outside both live namespaces.
+  static constexpr uint32_t PUSHED_UID_BIT = 0x20000000u;
   static constexpr std::size_t TOMBSTONE_CAPACITY = 8;
 
   struct Entry {

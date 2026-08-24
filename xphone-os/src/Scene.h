@@ -13,6 +13,32 @@
 #include "Gfx.h"
 #include "Input.h"
 
+// Soft-key labels that are ARROW MARKS rather than words.
+//
+// The UI fonts are ASCII+Latin subsets: U+2190.. simply have no glyph and
+// would draw as "?" (Gfx::findGlyph falls back). So an arrow is a SHAPE the
+// bar painter draws, and these one-byte sentinels are how a scene's plain
+// static label table asks for one. Anything else is drawn as text.
+//
+// THE DIRECTION-KEY RULE (slots 2 and 3, the only pair that ever means
+// "backward / forward"):
+//   Portrait — slot 2 is the LEFT key, slot 3 the RIGHT one.
+//   Landscape — the tab column runs UPWARD from slot 0, so slot 3 is the TOP
+//   key and slot 2 the one below it.
+// Because of that, every landscape pair is drawn VERTICALLY with the up
+// arrow on slot 3, and a screen whose portrait pair reads back-then-forward
+// left to right (page turn, list cursor, -1/+1) must SWAP which key does
+// what when the panel turns — otherwise the arrow points away from the
+// button you press. A scene owns that swap; ReaderScene::dirSwap() is the
+// single place it is decided.
+namespace SoftKey {
+constexpr const char* Left = "\x11";
+constexpr const char* Right = "\x12";
+constexpr const char* Up = "\x13";
+constexpr const char* Down = "\x14";
+inline bool isArrow(const char* s) { return s && s[0] >= '\x11' && s[0] <= '\x14' && s[1] == '\0'; }
+}  // namespace SoftKey
+
 class Scene {
  public:
   // M2.1: height (logical px) reserved at the BOTTOM of every scene for the
@@ -31,10 +57,14 @@ class Scene {
   virtual const char* const* softKeys() const;
   // M3: bitmask of soft-key slots (bit i = front button i, Back=0..Right=3)
   // that respond to a LONG PRESS. SceneManager marks those tabs with a small
-  // dot near the tab's top edge. Bit 0 is set by default for every scene:
-  // long-press BACK always jumps to the launcher (OS-wide convention,
-  // enforced in SceneManager::loop — scenes cannot override it).
-  virtual uint8_t longPressSlots() const { return 0x01; }
+  // dot near the tab's top edge.
+  //
+  // Bit 0 is deliberately NOT set by default even though long-press BACK
+  // always jumps to the launcher: a mark that appears on every tab of every
+  // screen forever is decoration, not a hint — and on a 28 px tab it landed
+  // on top of the label ("BAĊK"). The dot is reserved for long presses a
+  // reader could not otherwise guess, like hold-GO to delete a bookmark.
+  virtual uint8_t longPressSlots() const { return 0; }
   // Bitmask of soft-key slots rendered as a small GEAR icon in a half-width tab
   // (right-aligned within the slot, so it shrinks toward the neighbouring tab)
   // instead of a text label. Used for the launcher's Settings key. Default: none.
@@ -114,6 +144,12 @@ class SceneManager {
   // M2: lets AppScenes' markXxxDirtyIfActive helpers target only the scene
   // that is actually on glass.
   Scene* active() const { return _active; }
+
+  // Repaint from inside a long blocking operation (a multi-minute HTTP
+  // upload starves the main loop, so the transfer panel froze at "0 KB
+  // moved" — 2026-08-18). Same thread as loop(); renderIfDirty already
+  // defers while the flush worker is busy. No-op before the first render.
+  void renderNow();
 
   // M5 responsiveness (Phase 2): true while the flush worker is driving the
   // panel. renderIfDirty() defers composing while set (state keeps advancing;

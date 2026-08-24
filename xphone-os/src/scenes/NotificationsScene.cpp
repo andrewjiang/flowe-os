@@ -65,21 +65,21 @@ const char* const* NotificationsScene::softKeys() const {
   // one stray press can no longer wipe the list. With the header SYNC pill
   // selected (_sel == -1) the CONFIRM tab relabels to SYNC — the bar repaints
   // with every scene repaint, so the label follows the cursor for free.
-  static constexpr const char* kList[4] = {"BACK", "OPEN", "UP", "DOWN"};
-  static constexpr const char* kListSync[4] = {"BACK", "SYNC", "UP", "DOWN"};
+  static constexpr const char* kList[4] = {"BACK", "OPEN", SoftKey::Left, SoftKey::Right};
+  static constexpr const char* kListSync[4] = {"BACK", "SYNC", SoftKey::Left, SoftKey::Right};
   static constexpr const char* kListSyncEmpty[4] = {"BACK", "SYNC", nullptr, nullptr};
-  static constexpr const char* kDetail[4] = {"BACK", "CLEAR", "PREV", "NEXT"};
+  static constexpr const char* kDetail[4] = {"BACK", "CLEAR", SoftKey::Left, SoftKey::Right};
   if (_view == View::Detail) return kDetail;
   if (_sel < 0) return NOTIFICATION_STORE.count() > 0 ? kListSync : kListSyncEmpty;
   return kList;
 }
 
 uint8_t NotificationsScene::longPressSlots() const {
-  // Bit 0 (BACK -> launcher) is OS-wide; bit 1 marks the list's OPEN tab
-  // while there is something to clear (long-press CONFIRM = clear all).
-  // No dot on the SYNC pill's tab — sync has no long-press action.
-  if (_view == View::List && _sel >= 0 && NOTIFICATION_STORE.count() > 0) return 0x01 | 0x02;
-  return 0x01;
+  // Bit 1 marks the list's OPEN tab while there is something to clear
+  // (long-press CONFIRM = clear all). No dot on the SYNC pill's tab — sync
+  // has no long-press action, and none on BACK (see Scene::longPressSlots).
+  if (_view == View::List && _sel >= 0 && NOTIFICATION_STORE.count() > 0) return 0x02;
+  return 0;
 }
 
 int NotificationsScene::rowsPerPage(Gfx& gfx) const {

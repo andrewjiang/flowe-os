@@ -146,15 +146,57 @@ class CompanionBleService final {
   // R2 Read — phone-initiated requests, latched by applyCardPayload (main
   // loop) and consumed by main.cpp's pump. No mutex needed: both sides run
   // on the main loop.
-  enum class TransferRequest : uint8_t { None, Start, Stop };
+  enum class TransferRequest : uint8_t { None, Start, StartDirect, Stop };
   bool consumeShelfRequest();
+  // Same latch, for reading progress + stats.
+  bool consumeProgressRequest();
+  bool consumeWifiKnownRequest();  // W1: app asked for the network report
   TransferRequest consumeTransferRequest();
+
+  // Item 6: a reading place pushed from a phone over the (encrypted) link.
+  // Latched here by applyCardPayload; the main loop writes the matching
+  // book's .pos so the next open resumes there. The reader suspends BLE
+  // while open, so a push only ever arrives off the reading screen — no
+  // live-jump into an open book is needed.
+  struct PlacePush {
+    char key[64];       // canonical book key
+    uint32_t page;
+    uint32_t pageCount;
+    uint64_t seq;
+    uint64_t atMillis;
+  };
+  bool consumePlacePush(PlacePush& out);
+  // Bench: inject a place push through the same latch the card handler
+  // uses, so the write+resume path is provable without the app's sender.
+  void benchInjectPlace(const char* key, uint32_t page, uint32_t pageCount);
+
+  // Item 6 step 3, OUTBOUND. The reader suspends BLE while open, so the
+  // moment the phone can hear where the device got to is book-close, when
+  // the radio comes back. ReaderScene::onExit queues the last-read place
+  // here; the pump sends it once the link is up and encrypted.
+  void queueReaderPlace(const char* key, uint32_t page, uint32_t pageCount);
+  // Main loop: if a place is queued and the link is encrypted, notify it.
+  void pumpReaderPlace();
+  // Set when the phone writes (proving it is subscribed); cleared on
+  // disconnect. Gates the outbound place past the re-subscription race.
+  void notePhoneGone();
+  // GAP SUBSCRIBE events, routed from the gap hook: the truth about whether
+  // the action channel has a live listener this connection.
+  void noteActionSubscribe(uint16_t connHandle, uint16_t attrHandle, bool curNotify);
+  void noteConnHandle(uint16_t connHandle);
 
   // Scan /books on the SD card and notify it as chunked "reader.shelf"
   // JSON messages sized to the live ATT MTU (a notify larger than MTU-3 is
   // silently truncated by NimBLE, which would corrupt the JSON). Main loop
   // only (SD access + notifies).
   void sendReaderShelf();
+  // W1: saved network names + last-scan sightings + any pending join
+  // failure (read-and-clear), as one chunked notify.
+  void sendWifiKnown();
+  // Reading progress + lifetime stats, chunked like the shelf. This is what
+  // makes the app correct whenever you open it: without it, progress only
+  // reaches the phone during a Wi-Fi transfer session started by hand.
+  void sendReaderProgress();
   // Notify the phone with the ANCS app-name cache as chunked "notif.apps"
   // messages. Main-loop-only for the same reason as the cache enumerator.
   void sendNotifApps();
@@ -190,7 +232,23 @@ class CompanionBleService final {
 
   // R2 Read — main-loop-only latches (see consumeShelfRequest above).
   bool shelfRequested = false;
+  bool progressRequested = false;
+  bool wifiKnownRequested = false;
   TransferRequest transferRequest = TransferRequest::None;
+  bool placePushPending = false;
+  PlacePush pendingPlace{};
+  bool outPlacePending = false;
+  PlacePush pendingOut{};
+  uint32_t placeSeq = 0;  // monotonic within a boot; orders our own sends
+  bool phoneReadyForNotify = false;
+  // iOS NEVER re-writes the CCCD for a bonded peer — the spec says the
+  // device must remember it, and ours forgets on every reboot. When no
+  // subscribe arrived but the link is encrypted, notifyAction() sends
+  // straight through the stack so iOS's assumption is true. (Found
+  // 2026-08-23: three healthy connections, zero notifications received.)
+  bool actionSubscribed = false;
+  uint16_t encConnHandle = 0xFFFF;
+  void notifyAction();
 
   // Security pump state — written from the NimBLE host task (arm/disarm/
   // encryption-change) and the main loop (processPending), so every touch

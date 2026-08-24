@@ -96,6 +96,16 @@ void showFileTransferAutoStart() {
   gFileTransfer.autoStart();       // then bring the radio up (STA or hotspot)
 }
 
+void fileTransferRestartFromCard(const bool direct) {
+  gFileTransfer.restartFromCard(direct);
+}
+
+void showFileTransferAutoStartDirect() {
+  gCurrentSceneId = SceneId::FileTransfer;
+  SCENES.switchTo(gFileTransfer);
+  gFileTransfer.autoStartDirect();
+}
+
 void stopFileTransferIfActive() {
   if (SCENES.active() == &gFileTransfer) gFileTransfer.stopAndRestart();
 }
@@ -162,3 +172,8 @@ void markTodayDirtyIfActive() {
 void markWorkoutDirtyIfActive() {
   if (SCENES.active() == &gWorkout) gWorkout.markDirty();
 }
+
+int launcherSelection() { return gLauncher.selection(); }
+
+void readerWhere(char* out, size_t n) { gReader.debugWhere(out, n); }
+void readerShelfDump() { gReader.debugShelfDump(); }

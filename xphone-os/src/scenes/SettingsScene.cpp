@@ -92,9 +92,9 @@ void SettingsScene::onEnter() {
 }
 
 const char* const* SettingsScene::softKeys() const {
-  static constexpr const char* kListKeys[4] = {"BACK", "OPEN", "UP", "DOWN"};
+  static constexpr const char* kListKeys[4] = {"BACK", "OPEN", SoftKey::Left, SoftKey::Right};
   static constexpr const char* kConfirmKeys[4] = {"NO", "YES", nullptr, nullptr};
-  static constexpr const char* kIconKeys[4] = {"BACK", nullptr, "PREV", "NEXT"};
+  static constexpr const char* kIconKeys[4] = {"BACK", nullptr, SoftKey::Left, SoftKey::Right};
   if (_view == View::ConfirmFlash || _view == View::ConfirmRestart) return kConfirmKeys;
   if (_view == View::IconStyle) return kIconKeys;
   return kListKeys;
@@ -285,7 +285,7 @@ void SettingsScene::drawRow(Gfx& gfx, const int y, const int rowH, const char* l
 }
 
 void SettingsScene::renderMenu(Gfx& gfx) {
-  drawHeader(gfx, "Settings", XPHONE_VERSION);
+  drawHeader(gfx, "Settings", nullptr);  // version lives in the footer, once
 
   const int rowH = gfx.lineHeight(kFontBold) + kRowPad;
   int y = kHeaderH + 8;
@@ -328,7 +328,10 @@ void SettingsScene::renderIconStyle(Gfx& gfx) {
   const int gridX = (gfx.width() - gridW) / 2;
   const int gridY = kHeaderH + 10 + 2 * gfx.lineHeight(kFontBold) + 20;
 
-  static constexpr const char* kLabels[6] = {"Notif", "Read", "Today", "Priorities", "Block", "Workout"};
+  // Launcher order — Today(0) Notifications(1) Priorities(2) Block(3)
+  // Read(4) Workout(5). The first version hand-typed a different order and
+  // five of six previews wore the wrong name (audit 2026-08-18, A1).
+  static constexpr const char* kLabels[6] = {"Today", "Notif", "Priorities", "Block", "Read", "Workout"};
 
   // Downscale 104 -> 72 by nearest-neighbor sampling into a stack buffer of
   // one destination row, then draw. Keeps the preview cheap (no heap).

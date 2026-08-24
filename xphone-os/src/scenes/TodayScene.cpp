@@ -161,7 +161,7 @@ void TodayScene::requestSync() {
 }
 
 const char* const* TodayScene::softKeys() const {
-  static constexpr const char* kFull[4] = {"BACK", "SYNC", "UP", "DOWN"};
+  static constexpr const char* kFull[4] = {"BACK", "SYNC", SoftKey::Left, SoftKey::Right};
   static constexpr const char* kEmpty[4] = {"BACK", "SYNC", nullptr, nullptr};
   return TODAY_STORE.hasSnapshot() ? kFull : kEmpty;
 }
@@ -248,6 +248,14 @@ void TodayScene::render(Gfx& gfx) {
     _scroll = 0;
     _maxScrollCache = 0;
     const int cy = h / 2;
+    // A synced-but-empty day is not "Syncing..." — the stamp in the header
+    // says the sync happened; showing a spinner-word under it read as a hang
+    // (X4 walk, 2026-08-17). An empty day gets said plainly.
+    if (TODAY_STORE.hasSnapshot() && !_localMsg[0]) {
+      gfx.drawTextCentered(kFontBold, w / 2, cy - gfx.lineHeight(kFontBold), "All clear");
+      gfx.drawTextCentered(kFontRegular, w / 2, cy + 6, "Nothing on the calendar today.");
+      return;
+    }
     gfx.drawTextCentered(kFontBold, w / 2, cy - 2 * gfx.lineHeight(kFontBold), "Sync Today");
     const char* line = _localMsg[0]                 ? _localMsg
                        : COMPANION_BLE.isConnected() ? "Syncing..."

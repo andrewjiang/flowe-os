@@ -137,7 +137,7 @@ void PrioritiesScene::onEnter() {
 }
 
 const char* const* PrioritiesScene::softKeys() const {
-  static constexpr const char* kList[4] = {"BACK", "DONE", "UP", "DOWN"};
+  static constexpr const char* kList[4] = {"BACK", "DONE", SoftKey::Left, SoftKey::Right};
   static constexpr const char* kEmpty[4] = {"BACK", "SYNC", nullptr, nullptr};
   return PRIORITIES_STORE.count() > 0 ? kList : kEmpty;
 }

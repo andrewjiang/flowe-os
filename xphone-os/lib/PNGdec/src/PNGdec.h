@@ -47,7 +47,12 @@
 #define TRUE 1
 #endif
 /* Defines and variables */
-#define PNG_FILE_BUF_SIZE 2048
+// 1024, was 2048 (vendored change, 2026-08-18): sizeof(PNG) IS the cover
+// decoder's scratch request, and at 2048 it lost the post-reading heap by
+// exactly 76 bytes (audit I8) — the largest free block settles at 59380.
+// Halving the file buffer costs a handful of extra SD reads per one-time
+// thumb decode and buys ~1 KB of margin under that ceiling.
+#define PNG_FILE_BUF_SIZE 1024
 // Number of bytes to reserve for current and previous lines
 // Defaults to 320 32-bit pixels max width
 // but can be overidden with a macro defined at compile time

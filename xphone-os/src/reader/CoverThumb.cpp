@@ -639,7 +639,14 @@ bool CoverThumb::ensure(Epub& epub, const int w, const int h, std::string* outPa
   if (noneSentinelCurrent(nonePath)) return false;
 
   std::string coverHref;
-  if (!epub.getCoverHref(&coverHref)) return false;  // no cover: caller renders a text-only tile
+  if (!epub.getCoverHref(&coverHref)) {
+    // "The OPF names no cover" is as definitive as a broken image — persist
+    // it, or every future shelf pass re-answers -1 (transient) and the tile
+    // never settles past "..." (audit I3/I8 tail, 2026-08-18).
+    epub.setupCacheDir();
+    writeNoneSentinel(nonePath);
+    return false;  // caller renders a text-only tile
+  }
 
   epub.setupCacheDir();
 
@@ -722,7 +729,8 @@ void CoverThumb::releaseScratch() {
   }
 }
 
-bool CoverThumb::draw(Gfx& gfx, const char* binPath, const int x, const int y, int* outW, int* outH) {
+bool CoverThumb::draw(Gfx& gfx, const char* binPath, const int x, const int y, int* outW,
+                      int* outH, const int clipX0, const int clipX1) {
   HalFile f;
   if (!Storage.openFileForRead("CVR", binPath, f)) return false;
 
@@ -748,7 +756,10 @@ bool CoverThumb::draw(Gfx& gfx, const char* binPath, const int x, const int y, i
       if (!byte) continue;  // fast-skip all-paper bytes
       const int colBase = b << 3;
       for (int bit = 0; bit < 8; bit++) {
-        if (byte & (0x80 >> bit)) gfx.drawPixel(x + colBase + bit, y + r, true);
+        if (!(byte & (0x80 >> bit))) continue;
+        const int px = x + colBase + bit;
+        if (px < clipX0 || px >= clipX1) continue;
+        gfx.drawPixel(px, y + r, true);
       }
     }
   }

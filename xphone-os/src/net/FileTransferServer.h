@@ -42,6 +42,13 @@ class FileTransferServer {
   uint32_t bytesDownloaded() const { return _bytesDownloaded; }
   uint16_t requestCount() const { return _requestCount; }
 
+  // Called at upload start and every ~4 MB of body received. A whole
+  // multipart upload runs inside ONE handleClient() call, so the scene's
+  // normal tick can't repaint for minutes — the panel froze at "0 KB
+  // moved" during a 65 MB book (2026-08-18). Plain function pointer,
+  // no heap.
+  void (*progressHook)() = nullptr;
+
  private:
   struct UploadState {
     // 4 KB batches small multipart chunks into fewer, larger SD writes —
@@ -58,15 +65,21 @@ class FileTransferServer {
 
   void handleRoot();
   void handleStatus();
+  void handleManifest();
   void handleFileList();
   void handleDownload();
   void handleDelete();
+  /// Remove the other half of a book (its source, or its package) plus their
+  /// sidecars, matching on the canonical book key so two phones that spelled
+  /// the same title differently still count as one book. Returns the count.
+  int removeBookSiblings(const char* path);
   void handleUploadData();  // multipart body callback (START/WRITE/END/ABORT)
   void handleUploadDone();  // final response after body consumed
   bool flushUploadBuffer();
 
   // Normalized "path" query arg into dst ("/books" default). Returns false
   // (and sends a 400) when missing/invalid.
+  bool tokenOk();
   bool queryPath(char* dst, size_t dstSize, bool required);
 
   std::unique_ptr<WebServer> _server;
@@ -74,6 +87,7 @@ class FileTransferServer {
   bool _running = false;
   uint32_t _bytesUploaded = 0;
   uint32_t _bytesDownloaded = 0;
+  uint32_t _hookMark = 0;
   uint16_t _requestCount = 0;
 
   // The upload FsFile is kept out of the header to avoid dragging SdFat
