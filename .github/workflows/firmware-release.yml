@@ -35,8 +35,8 @@ jobs:
             xphone-os/.pio/build
           key: ${{ runner.os }}-platformio-${{ hashFiles('xphone-os/platformio.ini') }}
 
-      - name: Install PlatformIO
-        run: python -m pip install platformio
+      - name: Install PlatformIO and esptool
+        run: python -m pip install platformio "esptool>=5,<6"
 
       - name: Resolve release version
         env:
@@ -56,6 +56,22 @@ jobs:
       - name: Build firmware
         run: cd xphone-os && pio run -e x3 -e x4
 
+      - name: Build merged full-flash image
+        run: |
+          # The web flasher's "clean install" path writes one image at offset
+          # 0x0 (bootloader + partition table + app). The primary browser path
+          # is an OTA-slot write of update.bin, which keeps the bond; this
+          # merged image is for a clean install or a device in an unknown
+          # state. otadata is left out on purpose: a full-erase flash blanks
+          # it, and the bootloader then boots app0, where the app here lands.
+          BUILD=xphone-os/.pio/build/x3
+          python -m esptool --chip esp32c3 merge-bin \
+            -o dist-full.bin \
+            --flash-mode dio --flash-freq 80m --flash-size 16MB \
+            0x0 "$BUILD/bootloader.bin" \
+            0x8000 "$BUILD/partitions.bin" \
+            0x10000 "$BUILD/firmware.bin"
+
       - name: Stage release assets
         run: |
           mkdir -p dist
@@ -65,6 +81,8 @@ jobs:
           cp dist/flowe-x4.bin "dist/flowe-x4-${VERSION}.bin"
           # Pre-named for the SD updater so users skip the rename step.
           cp dist/flowe-x3.bin dist/update.bin
+          # Merged full-flash image for the web flasher's clean-install path.
+          cp dist-full.bin dist/flowe-full.bin
 
           # Zip wrapper: a re-downloaded zip gets browser-renamed, but the
           # update.bin inside keeps its exact name.
@@ -121,6 +139,7 @@ jobs:
               flowe-firmware.zip \
               flowe-x3.zip \
               flowe-x4.zip \
+              flowe-full.bin \
               update.bin \
               flowe-x3.bin \
               flowe-x4.bin \
@@ -141,9 +160,29 @@ jobs:
           def sha256(path: Path) -> str:
               return hashlib.sha256(path.read_bytes()).hexdigest()
 
+          def entry(name: str) -> dict:
+              path = dist / name
+              return {
+                  "file": name,
+                  "sha256": sha256(path),
+                  "size": path.stat().st_size,
+              }
+
           manifest = {
               "version": os.environ["VERSION"],
               "date": os.environ["RELEASE_DATE"],
+              "chip": "esp32c3",
+              # esptool flash parameters — the web flasher passes these to
+              # writeFlash so a browser flash matches the CI merge exactly.
+              "flash": {"mode": "dio", "freq": "80m", "size": "16MB"},
+              # OTA-slot flash (the primary browser path): the app image the
+              # SD updater also uses. Flashed into the inactive OTA slot; keeps
+              # the bond.
+              "app": entry("update.bin"),
+              # Clean-install flash: one merged image at offset 0. Wipes NVS
+              # (the bond); books on the SD card are untouched.
+              "full": {**entry("flowe-full.bin"), "offset": 0},
+              # Kept for back-compat with anything reading the old shape.
               "assets": {
                   "x3": {
                       "file": "flowe-x3.bin",
