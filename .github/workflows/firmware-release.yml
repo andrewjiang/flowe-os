@@ -82,10 +82,27 @@ jobs:
             > ziproot/flowe-x3/README.txt
           (cd ziproot && zip -qr ../dist/flowe-x3.zip flowe-x3)
 
+          # X4 zip: same universal image, X4 wording. The flash page links
+          # both names; a missing flowe-x4.zip 404s the X4 download button.
+          mkdir -p ziproot/flowe-x4
+          cp dist/flowe-x4.bin ziproot/flowe-x4/update.bin
+          printf '%s\n' \
+            'Flowe OS - X4 firmware' \
+            '' \
+            '1. Copy update.bin to the root of the microSD card.' \
+            '2. Put the card back in the X4.' \
+            '3. Hold the left side button and power together until the' \
+            '   update screen appears.' \
+            '' \
+            'Guide: https://www.flowe.ink/flash' \
+            > ziproot/flowe-x4/README.txt
+          (cd ziproot && zip -qr ../dist/flowe-x4.zip flowe-x4)
+
           (
             cd dist
             sha256sum \
               flowe-x3.zip \
+              flowe-x4.zip \
               update.bin \
               flowe-x3.bin \
               flowe-x4.bin \
