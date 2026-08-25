@@ -151,14 +151,18 @@ void PrioritiesScene::toggleSelected() {
   PrioritiesStore::Item item;
   if (_sel < 0 || !PRIORITIES_STORE.get(static_cast<std::size_t>(_sel), item)) return;
   if (item.id[0] == '\0') return;  // phone sent no id — nothing to address
-  // No optimistic flip: iOS acks a toggle by re-sending the snapshot card
-  // (PrioritiesManager.swift handleActionPayload), and that fresh card is
-  // what repaints the row — the same wait CrossPoint's activity does.
-  if (COMPANION_BLE.sendPriorityToggle(item.id, !item.done)) {
-    _localMsg = "Updating priority...";
-  } else {
-    _localMsg = "Connect Companion to update.";
-  }
+  const bool desired = !item.done;
+  // Optimistic flip + durable pending overlay: the checkbox changes at once and
+  // survives a stale snapshot, so a priority can be checked off with the phone
+  // away (matching Workout's local counting and Notifications' local clear).
+  // The toggle is sent now if the link is up, and re-sent on reconnect
+  // (main.cpp); the phone's confirming snapshot then clears the pending entry.
+  PRIORITIES_STORE.setDoneLocal(static_cast<std::size_t>(_sel), desired);
+  const bool sent = COMPANION_BLE.sendPriorityToggle(item.id, desired);
+  _localMsg = sent ? "Updating priority..." : "Saved. Syncs when connected.";
+  // setDoneLocal bumped the revision; adopt it as seen so render() does not
+  // mistake our own local flip for a fresh phone snapshot and wipe the message.
+  _seenStoreRevision = PRIORITIES_STORE.revision();
   markDirty();
 }
 

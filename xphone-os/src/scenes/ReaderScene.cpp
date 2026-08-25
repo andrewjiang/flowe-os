@@ -1756,7 +1756,17 @@ void ReaderScene::moveSelection(const int delta) {
   // Window chase: if the visible page fell outside the stored window,
   // rescan around it (keeps RAM fixed while the library is unbounded; the
   // few-ms card walk replaces the old hard 32-book ceiling).
-  if (_scroll < _windowOffset || _scroll + perPage > _windowOffset + _bookCount) {
+  //
+  // Clamp the page to the end of the LIBRARY before comparing: the bottom
+  // page of a 9-book shelf shows books 6-8 plus an empty tile, and the
+  // unclamped `_scroll + perPage` (= 10) read that empty tile as "outside
+  // the window" (> 9), forcing a rescan. That rescan is not harmless: a
+  // windowed scan (offset > 0) stores books in raw CARD order — the sorted
+  // order only exists when the window is the whole library — so the shelf
+  // silently reshuffled and tiles changed identity on the way back up
+  // (Shawn's 9-book report, reproduced on the bench with 15).
+  const int pageEnd = _scroll + perPage < _totalBooks ? _scroll + perPage : _totalBooks;
+  if (_scroll < _windowOffset || pageEnd > _windowOffset + _bookCount) {
     const int sav_sel = _sel, sav_scroll = _scroll;
     int base = _scroll - kGridCols * kGridRows;  // one page of back-margin
     if (base < 0) base = 0;

@@ -401,6 +401,45 @@ static void pumpCompanionEvents() {
   static uint32_t resyncNextAtMs = 0;
   static uint32_t resyncBaselineRailRev = 0;
 
+  // Flush of offline priority toggles. Deliberately NOT tied to the
+  // connect edge: the bench proved an edge can be missed entirely (a second
+  // phone holding the link means isConnected() never dips, and a send right
+  // at a fresh edge can hit a not-yet-mature link and be dropped silently).
+  // An edge-triggered flush that misses leaves the toggle stranded forever,
+  // which is exactly the durability this fix promises. So instead: while
+  // anything is pending AND the link is up, re-send on a slow timer, capped
+  // so a phone that never confirms can't be spammed. The store's reconcile
+  // clears each pending entry once the phone's snapshot agrees, which is
+  // what actually ends the loop. Scene-independent — a toggle syncs even
+  // after the user leaves the Priorities scene.
+  constexpr uint8_t kPendingPushMaxAttempts = 6;
+  constexpr uint32_t kPendingPushIntervalMs = 3000;
+  static uint8_t pendingPushAttemptsLeft = 0;
+  static uint32_t pendingPushNextAtMs = 0;
+  static std::size_t lastPendingCount = 0;
+
+  // New (or newly cleared) pending work re-arms the attempt budget, so each
+  // offline toggle gets its own full set of tries.
+  const std::size_t pendingNow = PRIORITIES_STORE.pendingCount();
+  if (pendingNow != lastPendingCount) {
+    lastPendingCount = pendingNow;
+    pendingPushAttemptsLeft = pendingNow > 0 ? kPendingPushMaxAttempts : 0;
+    pendingPushNextAtMs = millis();
+  }
+  if (pendingNow > 0 && connected && pendingPushAttemptsLeft > 0 &&
+      static_cast<int32_t>(millis() - pendingPushNextAtMs) >= 0) {
+    for (std::size_t i = 0; i < pendingNow; i++) {
+      char pendId[65];
+      bool pendDone = false;
+      if (PRIORITIES_STORE.pendingGet(i, pendId, pendDone)) {
+        COMPANION_BLE.sendPriorityToggle(pendId, pendDone);
+      }
+    }
+    COMPANION_BLE.sendPrioritiesSyncRequest();  // ask for the confirming snapshot
+    pendingPushAttemptsLeft--;
+    pendingPushNextAtMs = millis() + kPendingPushIntervalMs;
+  }
+
   if (connected != lastConnForResync) {
     lastConnForResync = connected;
     if (connected) {

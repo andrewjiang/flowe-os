@@ -53,9 +53,27 @@ class PrioritiesStore {
   // The snapshot card's body line ("" until the first snapshot lands).
   const char* syncLine() const { return _syncLine; }
 
-  // Bumped on every updateFromCard(); the main loop polls this to mark the
-  // Priorities scene dirty, and Sleep.cpp polls it to detect the sync reply.
+  // Bumped on every updateFromCard() AND setDoneLocal(); the main loop polls
+  // this to mark the Priorities scene dirty, and Sleep.cpp polls it to detect
+  // the sync reply.
   uint32_t revision() const { return _revision; }
+
+  // --- Optimistic offline toggles (durable pending overlay) -----------------
+  // A DONE press flips the item at once (setDoneLocal) and records the desired
+  // state keyed by item id. updateFromCard keeps that desired state on top of
+  // any snapshot the phone sends until the phone's snapshot agrees, so a stale
+  // snapshot can't undo an offline toggle — the same durability the
+  // notification tombstones give clears. main.cpp re-sends the pending toggles
+  // on the reconnect edge; the phone's confirming snapshot then clears them.
+  //
+  // Flip _items[index].done to `done`, record/refresh a pending entry keyed by
+  // its id, and bump the revision. Returns false on a bad index or an item
+  // with no id (nothing addressable to send).
+  bool setDoneLocal(std::size_t index, bool done);
+  // Unsent toggles waiting for the phone. main.cpp enumerates these on the
+  // reconnect edge and re-sends each as a priority.toggle.
+  std::size_t pendingCount() const { return _pendingCount; }
+  bool pendingGet(std::size_t i, char (&idOut)[65], bool& doneOut) const;
 
  private:
   Item _items[CAPACITY];
@@ -66,6 +84,17 @@ class PrioritiesStore {
   // how many item slots they have filled so far.
   char _stageId[65] = {0};
   std::size_t _stageCount = 0;
+
+  // Pending optimistic toggles: one desired state per item id, at most one per
+  // item so CAPACITY is an ample bound. Reconciled against every committed
+  // snapshot (see updateFromCard).
+  struct Pending {
+    char id[65] = {0};
+    bool done = false;
+  };
+  Pending _pending[CAPACITY];
+  std::size_t _pendingCount = 0;
+  void recordPending(const char* id, bool done);
 };
 
 extern PrioritiesStore PRIORITIES_STORE;

@@ -38,9 +38,60 @@ void PrioritiesStore::updateFromCard(const CompanionCardState& card) {
   // on glass; the next sync repairs it.
   if (card.part + 1 >= card.parts) {
     _count = _stageCount;
+    // Reconcile the durable optimistic overlay against the fresh snapshot.
+    // Per pending toggle: the item is gone -> drop it; the snapshot already
+    // agrees -> the phone confirmed, drop it; the snapshot still disagrees ->
+    // a stale snapshot, re-assert the optimistic state and KEEP the entry so
+    // the reconnect flush can try again. Compacts survivors in place.
+    std::size_t kept = 0;
+    for (std::size_t p = 0; p < _pendingCount; p++) {
+      int found = -1;
+      for (std::size_t i = 0; i < _count; i++) {
+        if (strcmp(_items[i].id, _pending[p].id) == 0) {
+          found = static_cast<int>(i);
+          break;
+        }
+      }
+      if (found < 0) continue;                              // item gone -> drop
+      if (_items[found].done == _pending[p].done) continue;  // confirmed -> drop
+      _items[found].done = _pending[p].done;                 // stale -> keep optimistic
+      if (kept != p) _pending[kept] = _pending[p];
+      kept++;
+    }
+    _pendingCount = kept;
     snprintf(_syncLine, sizeof(_syncLine), "%s", card.body.c_str());
     _revision++;
   }
+}
+
+bool PrioritiesStore::setDoneLocal(std::size_t index, bool done) {
+  if (index >= _count) return false;
+  Item& it = _items[index];
+  if (it.id[0] == '\0') return false;  // nothing addressable to send
+  it.done = done;
+  recordPending(it.id, done);
+  _revision++;
+  return true;
+}
+
+void PrioritiesStore::recordPending(const char* id, bool done) {
+  for (std::size_t i = 0; i < _pendingCount; i++) {
+    if (strcmp(_pending[i].id, id) == 0) {  // one entry per id — refresh it
+      _pending[i].done = done;
+      return;
+    }
+  }
+  if (_pendingCount >= CAPACITY) return;  // <=1 per item, <=CAPACITY items: unreachable
+  snprintf(_pending[_pendingCount].id, sizeof(_pending[_pendingCount].id), "%s", id);
+  _pending[_pendingCount].done = done;
+  _pendingCount++;
+}
+
+bool PrioritiesStore::pendingGet(std::size_t i, char (&idOut)[65], bool& doneOut) const {
+  if (i >= _pendingCount) return false;
+  snprintf(idOut, sizeof(idOut), "%s", _pending[i].id);
+  doneOut = _pending[i].done;
+  return true;
 }
 
 bool PrioritiesStore::get(std::size_t index, Item& out) const {
