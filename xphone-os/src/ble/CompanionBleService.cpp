@@ -1025,7 +1025,10 @@ bool CompanionBleService::applyCardPayload(const std::string& payload) {
     return ok;
   }
   if (std::strcmp(type, "wifi.remove") == 0) {
-    return WifiCreds::removeSsid(doc["ssid"] | "");
+    const char* rmSsid = doc["ssid"] | "";
+    const bool removed = WifiCreds::removeSsid(rmSsid);
+    LOG_INF("X4CMP", "wifi.remove '%s' %s (%d saved)", rmSsid, removed ? "ok" : "NOT FOUND", WifiCreds::count());
+    return removed;
   }
   if (std::strcmp(type, "reader.place") == 0) {
     // Item 6: latch the pushed place; the pump writes the .pos. Just a copy

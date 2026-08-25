@@ -54,7 +54,10 @@ jobs:
           echo "RELEASE_TAG=${RELEASE_TAG}" >> "$GITHUB_ENV"
 
       - name: Build firmware
-        run: cd xphone-os && pio run -e x3 -e x4
+        # One env: x3 and x4 are aliases of the same universal image (the
+        # firmware picks the panel at boot), so building both doubled CI time
+        # to produce identical behavior.
+        run: cd xphone-os && pio run -e x3
 
       - name: Build merged full-flash image
         run: |
@@ -74,53 +77,25 @@ jobs:
 
       - name: Stage release assets
         run: |
+          # Asset diet (2026-08-25): the image is universal, so the old
+          # per-device names (flowe-x3/x4 .bin/.zip, versioned bins) were
+          # five copies of the same bytes and confused the release page.
+          # What remains, and who reads it:
+          #   flowe-firmware.zip  the flash page's Download (SD card path)
+          #   update.bin          web flasher Update + bare SD users
+          #   flowe-full.bin      web flasher Clean install (offset 0x0)
+          #   latest.json         manifest: version, flash params, sha256s
+          #   SHA256SUMS.txt      integrity for all of the above
           mkdir -p dist
-          cp xphone-os/.pio/build/x3/firmware.bin dist/flowe-x3.bin
-          cp xphone-os/.pio/build/x4/firmware.bin dist/flowe-x4.bin
-          cp dist/flowe-x3.bin "dist/flowe-x3-${VERSION}.bin"
-          cp dist/flowe-x4.bin "dist/flowe-x4-${VERSION}.bin"
-          # Pre-named for the SD updater so users skip the rename step.
-          cp dist/flowe-x3.bin dist/update.bin
-          # Merged full-flash image for the web flasher's clean-install path.
+          cp xphone-os/.pio/build/x3/firmware.bin dist/update.bin
           cp dist-full.bin dist/flowe-full.bin
 
           # Zip wrapper: a re-downloaded zip gets browser-renamed, but the
-          # update.bin inside keeps its exact name.
-          mkdir -p ziproot/flowe-x3
-          cp dist/flowe-x3.bin ziproot/flowe-x3/update.bin
-          printf '%s\n' \
-            'Flowe OS - X3 firmware' \
-            '' \
-            '1. Copy update.bin to the root of the microSD card.' \
-            '2. Put the card back in the X3.' \
-            '3. Hold the left side button and power together until the' \
-            '   update screen appears.' \
-            '' \
-            'Guide: https://www.flowe.ink/flash' \
-            > ziproot/flowe-x3/README.txt
-          (cd ziproot && zip -qr ../dist/flowe-x3.zip flowe-x3)
-
-          # X4 zip: same universal image, X4 wording. The flash page links
-          # both names; a missing flowe-x4.zip 404s the X4 download button.
-          mkdir -p ziproot/flowe-x4
-          cp dist/flowe-x4.bin ziproot/flowe-x4/update.bin
-          printf '%s\n' \
-            'Flowe OS - X4 firmware' \
-            '' \
-            '1. Copy update.bin to the root of the microSD card.' \
-            '2. Put the card back in the X4.' \
-            '3. Hold the left side button and power together until the' \
-            '   update screen appears.' \
-            '' \
-            'Guide: https://www.flowe.ink/flash' \
-            > ziproot/flowe-x4/README.txt
-          (cd ziproot && zip -qr ../dist/flowe-x4.zip flowe-x4)
-
-          # Neutral zip: the flash page's single Download button links
-          # releases/latest/download/flowe-firmware.zip, so every release
-          # must carry it or the button 404s the day a new tag lands.
+          # update.bin inside keeps its exact name. The flash page's single
+          # Download button links releases/latest/download/flowe-firmware.zip,
+          # so every release must carry it or the button 404s.
           mkdir -p ziproot/flowe-firmware
-          cp dist/flowe-x3.bin ziproot/flowe-firmware/update.bin
+          cp dist/update.bin ziproot/flowe-firmware/update.bin
           printf '%s\n' \
             'Flowe OS firmware - works on both the Xteink X3 and X4' \
             '' \
@@ -137,14 +112,8 @@ jobs:
             cd dist
             sha256sum \
               flowe-firmware.zip \
-              flowe-x3.zip \
-              flowe-x4.zip \
               flowe-full.bin \
               update.bin \
-              flowe-x3.bin \
-              flowe-x4.bin \
-              "flowe-x3-${VERSION}.bin" \
-              "flowe-x4-${VERSION}.bin" \
               > SHA256SUMS.txt
           )
 
@@ -157,14 +126,11 @@ jobs:
 
           dist = Path("dist")
 
-          def sha256(path: Path) -> str:
-              return hashlib.sha256(path.read_bytes()).hexdigest()
-
           def entry(name: str) -> dict:
               path = dist / name
               return {
                   "file": name,
-                  "sha256": sha256(path),
+                  "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
                   "size": path.stat().st_size,
               }
 
@@ -172,27 +138,15 @@ jobs:
               "version": os.environ["VERSION"],
               "date": os.environ["RELEASE_DATE"],
               "chip": "esp32c3",
-              # esptool flash parameters — the web flasher passes these to
+              # esptool flash parameters - the web flasher passes these to
               # writeFlash so a browser flash matches the CI merge exactly.
               "flash": {"mode": "dio", "freq": "80m", "size": "16MB"},
-              # OTA-slot flash (the primary browser path): the app image the
-              # SD updater also uses. Flashed into the inactive OTA slot; keeps
-              # the bond.
+              # OTA-slot flash (the primary browser path): flashed into the
+              # inactive OTA slot; keeps the bond.
               "app": entry("update.bin"),
               # Clean-install flash: one merged image at offset 0. Wipes NVS
               # (the bond); books on the SD card are untouched.
               "full": {**entry("flowe-full.bin"), "offset": 0},
-              # Kept for back-compat with anything reading the old shape.
-              "assets": {
-                  "x3": {
-                      "file": "flowe-x3.bin",
-                      "sha256": sha256(dist / "flowe-x3.bin"),
-                  },
-                  "x4": {
-                      "file": "flowe-x4.bin",
-                      "sha256": sha256(dist / "flowe-x4.bin"),
-                  },
-              },
           }
 
           (dist / "latest.json").write_text(
