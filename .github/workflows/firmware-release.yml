@@ -50,8 +50,18 @@ jobs:
             RELEASE_TAG="fw-v${VERSION}"
           fi
 
+          # A release-candidate tag (fw-v0.6.4-rc1) must NEVER become the
+          # repo's "latest" release: the site's download button and the web
+          # flasher both read releases/latest/download/..., so an untested RC
+          # would ship itself to every user the moment CI finished (caught
+          # happening on rc1, 2026-08-26). Marking it a prerelease keeps
+          # GitHub's "latest" pointing at the last real release.
+          PRERELEASE=false
+          case "${VERSION}" in *-rc*|*-beta*|*-alpha*) PRERELEASE=true ;; esac
+
           echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
           echo "RELEASE_TAG=${RELEASE_TAG}" >> "$GITHUB_ENV"
+          echo "PRERELEASE=${PRERELEASE}" >> "$GITHUB_ENV"
 
       - name: Build firmware
         # One env: x3 and x4 are aliases of the same universal image (the
@@ -162,4 +172,6 @@ jobs:
           name: Firmware ${{ env.VERSION }}
           generate_release_notes: true
           fail_on_unmatched_files: true
+          prerelease: ${{ env.PRERELEASE }}
+          make_latest: ${{ env.PRERELEASE == 'true' && 'false' || 'true' }}
           files: dist/*
