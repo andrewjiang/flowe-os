@@ -189,6 +189,26 @@ void EpdBus::sendPlaneFlipped(uint8_t ramCmd, const uint8_t* plane, uint16_t hei
   endTxn();
 }
 
+void EpdBus::sendPlaneFlippedInverted(uint8_t ramCmd, const uint8_t* plane, uint16_t height,
+                                      uint16_t widthBytes) {
+  uint8_t chunk[128];
+  cmd(ramCmd);
+  beginTxn();
+  for (int y = static_cast<int>(height) - 1; y >= 0; y--) {
+    const uint8_t* row = plane + static_cast<uint32_t>(y) * widthBytes;
+    uint16_t offset = 0;
+    while (offset < widthBytes) {
+      const uint16_t n = static_cast<uint16_t>(widthBytes - offset) < sizeof(chunk)
+                             ? static_cast<uint16_t>(widthBytes - offset)
+                             : static_cast<uint16_t>(sizeof(chunk));
+      for (uint16_t i = 0; i < n; ++i) chunk[i] = static_cast<uint8_t>(~row[offset + i]);
+      rawWriteBytes(chunk, n);
+      offset = static_cast<uint16_t>(offset + n);
+    }
+  }
+  endTxn();
+}
+
 void EpdBus::fillPlane(uint8_t ramCmd, uint8_t fillByte, uint16_t height, uint16_t widthBytes) {
   uint8_t row[128];
   if (widthBytes > sizeof(row)) widthBytes = sizeof(row);

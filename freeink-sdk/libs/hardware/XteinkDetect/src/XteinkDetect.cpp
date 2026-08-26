@@ -3,6 +3,8 @@
 #include <Arduino.h>
 #include <BoardConfig.h>
 #include <Wire.h>
+#include <driver/gpio.h>
+#include <string.h>
 
 namespace freeink {
 
@@ -114,7 +116,152 @@ uint8_t runProbePass() {
   return score;
 }
 
+
+// --- UC81xx display-controller probe ----------------------------------------
+// Newer X3 units ship a UC8279d where older ones have a UC8253. The two need
+// different drivers, and driving UC8253 sequences at a UC8279d leaves the panel
+// dark with BUSY stuck asserted, so the controller must be identified before
+// the display comes up. UC81xx parts answer register 0x70 (VER) and 0x71 (FLG);
+// the UC8253 and SSD-family do not, so their half-duplex line floats to a
+// uniform level. Bit-banged because this runs before EpdBus::begin().
+constexpr uint8_t UC81XX_CMD_VER = 0x70;
+constexpr uint8_t UC81XX_CMD_FLG = 0x71;
+
+struct EpdProbePins {
+  int8_t sclk, mosi, cs, dc, rst, busy;
+};
+
+inline void epdClockDelay() { delayMicroseconds(1); }  // ~500 kHz, timing-safe
+
+void epdWriteByte(const EpdProbePins& p, uint8_t b) {
+  for (uint8_t i = 0; i < 8; i++) {
+    digitalWrite(p.mosi, (b & 0x80) ? HIGH : LOW);
+    epdClockDelay();
+    digitalWrite(p.sclk, HIGH);
+    epdClockDelay();
+    digitalWrite(p.sclk, LOW);
+    b <<= 1;
+  }
+}
+
+uint8_t epdReadByte(const EpdProbePins& p) {
+  uint8_t b = 0;
+  for (uint8_t i = 0; i < 8; i++) {
+    // The controller shifts the next bit out on the SCL falling edge; sample
+    // while the clock is low, then pulse.
+    epdClockDelay();
+    b = static_cast<uint8_t>((b << 1) | (digitalRead(p.mosi) == HIGH ? 1 : 0));
+    digitalWrite(p.sclk, HIGH);
+    epdClockDelay();
+    digitalWrite(p.sclk, LOW);
+  }
+  return b;
+}
+
+// Command with DC low, then release SDA (our MOSI) to input with DC high while
+// the controller drives the read bytes.
+void epdCmdRead(const EpdProbePins& p, uint8_t cmd, uint8_t* out, uint8_t len) {
+  pinMode(p.mosi, OUTPUT);
+  digitalWrite(p.dc, LOW);
+  digitalWrite(p.cs, LOW);
+  epdClockDelay();
+  epdWriteByte(p, cmd);
+  digitalWrite(p.dc, HIGH);
+  pinMode(p.mosi, INPUT_PULLUP);
+  epdClockDelay();
+  for (uint8_t i = 0; i < len; i++) out[i] = epdReadByte(p);
+  digitalWrite(p.cs, HIGH);
+  pinMode(p.mosi, OUTPUT);
+}
+
+// Five identical bytes means nobody drove the line — a floating read, not a UC81xx.
+bool verIsFloating(const uint8_t ver[5]) {
+  for (int i = 1; i < 5; i++)
+    if (ver[i] != ver[0]) return false;
+  return true;
+}
+
+// No specific CHIP_VER is required: shipping parts have been seen reporting 0x00.
+// What matters is that FLG is a real driven status with BUSY_N (bit 0) idle and
+// that VER is a structured, non-uniform response.
+bool matchUc81xx(const uint8_t ver[5], uint8_t flg) {
+  if (flg == 0x00 || flg == 0xFF) return false;
+  if ((flg & 0x01) != 0x01) return false;
+  return !verIsFloating(ver);
+}
+
+bool runDisplayProbePass(const EpdProbePins& p, uint8_t ver[5], uint8_t* flg, uint8_t rstLowMs) {
+  pinMode(p.cs, OUTPUT);
+  digitalWrite(p.cs, HIGH);
+  pinMode(p.sclk, OUTPUT);
+  digitalWrite(p.sclk, LOW);
+  pinMode(p.dc, OUTPUT);
+  digitalWrite(p.dc, LOW);
+  pinMode(p.mosi, OUTPUT);
+  if (p.busy >= 0) pinMode(p.busy, INPUT);
+
+  // We cannot gate on BUSY here — which controller (and so which idle level) is
+  // present is exactly what we are identifying — so use a flat settle. The panel
+  // driver's begin() resets again afterwards, so this leaves no state behind.
+  if (p.rst >= 0) {
+    // A deep-sleep pin hold survives the wake reset; release it or every write
+    // below silently bounces off the latch and the probe picks the wrong driver.
+    gpio_hold_dis(static_cast<gpio_num_t>(p.rst));
+    pinMode(p.rst, OUTPUT);
+    digitalWrite(p.rst, HIGH);
+    delay(2);
+    digitalWrite(p.rst, LOW);
+    delay(rstLowMs);
+    digitalWrite(p.rst, HIGH);
+  }
+  delay(30);
+
+  uint8_t flgByte = 0;
+  epdCmdRead(p, UC81XX_CMD_FLG, &flgByte, 1);
+  epdCmdRead(p, UC81XX_CMD_VER, ver, 5);
+  if (flg) *flg = flgByte;
+  return matchUc81xx(ver, flgByte);
+}
+
+void releaseDisplayPins(const EpdProbePins& p) {
+  // RST_N has an internal pull-up, so INPUT keeps the controller out of reset.
+  pinMode(p.sclk, INPUT);
+  pinMode(p.mosi, INPUT);
+  pinMode(p.cs, INPUT_PULLUP);  // don't leave the panel selected
+  pinMode(p.dc, INPUT);
+  if (p.rst >= 0) pinMode(p.rst, INPUT);
+}
+
 }  // namespace
+
+bool detectXteinkX3IsUc8279() {
+  // X3 display pinout (BoardConfig XTEINK_X3.display): SCLK8 MOSI10 CS21 DC4
+  // RST5 BUSY6. Identical on both X3 siblings — only the controller differs.
+  const EpdProbePins p{8, 10, 21, 4, 5, 6};
+
+  uint8_t ver1[5] = {0}, ver2[5] = {0};
+  uint8_t flg1 = 0;
+  // Pass 1 screens with a cheap 1 ms reset; a UC8253 never answers, so it does
+  // not pay the vendor identification timing. Retry once at doc timing (RST low
+  // 50 ms) before concluding there is no UC81xx part.
+  bool pass1 = runDisplayProbePass(p, ver1, &flg1, /*rstLowMs=*/1);
+  if (!pass1) {
+    delay(2);
+    pass1 = runDisplayProbePass(p, ver1, &flg1, /*rstLowMs=*/50);
+  }
+  delay(2);
+  const bool pass2 = runDisplayProbePass(p, ver2, nullptr, /*rstLowMs=*/pass1 ? 50 : 1);
+  releaseDisplayPins(p);
+
+  // Confirmed only when both passes match AND agree byte for byte: a floating
+  // bus cannot produce the same stable non-trivial pattern twice.
+  const bool confirmed = pass1 && pass2 && memcmp(ver1, ver2, 5) == 0;
+  if (Serial) {
+    Serial.printf("[freeink] epd probe: VER=%02X %02X %02X %02X %02X FLG=%02X -> %s\n", ver1[0], ver1[1], ver1[2],
+                  ver1[3], ver1[4], flg1, confirmed ? "UC8279" : "UC8253");
+  }
+  return confirmed;
+}
 
 bool detectXteinkIsX3() {
   clearStuckBus();
@@ -128,8 +275,14 @@ bool detectXteinkIsX3() {
 
 bool selectXteinkDevice() {
   const bool isX3 = detectXteinkIsX3();
-  BoardConfig::selectDevice(isX3 ? BoardConfig::Board::XteinkX3 : BoardConfig::Board::XteinkX4);
-  return isX3;
+  if (!isX3) {
+    BoardConfig::selectDevice(BoardConfig::Board::XteinkX4);
+    return false;
+  }
+  // Same board, two panel controllers. Ask the controller which one it is.
+  const bool uc8279 = detectXteinkX3IsUc8279();
+  BoardConfig::selectDevice(uc8279 ? BoardConfig::Board::XteinkX3Uc8279 : BoardConfig::Board::XteinkX3);
+  return true;
 }
 
 }  // namespace freeink

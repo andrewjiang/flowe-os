@@ -23,6 +23,11 @@ namespace freeink {
 // call before any other hardware bring-up.
 bool detectXteinkIsX3();
 
+// True when an X3's panel is driven by a UC8279d rather than the older UC8253.
+// Only meaningful on an X3; probes the controller's VER/FLG registers directly.
+// Must run before the display bus is brought up.
+bool detectXteinkX3IsUc8279();
+
 // Convenience: run detectXteinkIsX3(), set BoardConfig::ACTIVE to the matching
 // profile via selectDevice(), and return whether an X3 was detected (so the
 // caller can put FreeInkDisplay in X3 mode with setDisplayX3()). Call this
