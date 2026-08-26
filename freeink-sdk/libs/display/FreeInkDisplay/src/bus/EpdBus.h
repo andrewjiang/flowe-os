@@ -70,6 +70,12 @@ class EpdBus {
   // mid-stream. (cmd uses its own CS pulse, matching the OEM sequence.)
   void sendPlaneFlipped(uint8_t ramCmd, const uint8_t* plane, uint16_t height, uint16_t widthBytes);
 
+  // As sendPlaneFlipped(), but streams the bit-complement of each row. Used by
+  // the UC8279 dark-background fast path to rewrite the OLD plane as the
+  // inverse of the target so every pixel re-drives. No host-side inverted copy
+  // is made — the C3 boards have no RAM to spare for one.
+  void sendPlaneFlippedInverted(uint8_t ramCmd, const uint8_t* plane, uint16_t height, uint16_t widthBytes);
+
   // Send `ramCmd` then fill an entire RAM plane with `fillByte` (height rows of
   // widthBytes), as one CS-low burst. No framebuffer touched.
   void fillPlane(uint8_t ramCmd, uint8_t fillByte, uint16_t height, uint16_t widthBytes);

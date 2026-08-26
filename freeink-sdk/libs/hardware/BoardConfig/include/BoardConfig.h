@@ -86,6 +86,13 @@
 #else
 #define FREEINK_DRIVER_UC8253_X3 0
 #endif
+// Newer X3 units ship a UC8279d in place of the UC8253. Both drivers link into
+// an X3 build; XteinkDetect's controller probe picks one at boot.
+#if FREEINK_DEVICE_X3
+#define FREEINK_DRIVER_UC8279 1
+#else
+#define FREEINK_DRIVER_UC8279 0
+#endif
 // M5 PaperColor has two interchangeable display backends: the fast hand-rolled
 // ED2208 driver (default), or M5's official M5GFX/M5Unified path (opt in with
 // -DFREEINK_M5_OFFICIAL=1, which pulls the M5 libraries — see platformio.sample).
@@ -245,6 +252,9 @@ enum class Board : uint8_t {
   LilyGoT5S3,
   M5PaperV11,
   Sticky,
+  // Newer X3 production run: same board/glass/pinout, UC8279d panel controller
+  // instead of the UC8253. Appended last so existing values keep their numbers.
+  XteinkX3Uc8279,
 };
 
 // How the board reports button presses.
@@ -258,7 +268,7 @@ enum class InputStyle : uint8_t {
 // Panel controller silicon. Drivers are selected from this at begin().
 // LgfxEpd = a raw-parallel EPD with no on-glass controller, driven via LovyanGFX
 // (e.g. ED047TC1 on LilyGo T5 S3).
-enum class DisplayController : uint8_t { SSD1677, UC8253, ED2208, LgfxEpd, IT8951 };
+enum class DisplayController : uint8_t { SSD1677, UC8253, ED2208, LgfxEpd, IT8951, UC8279 };
 
 // Optional capacitive touch controller.
 enum class TouchController : uint8_t { None, Chsc6x, Gt911 };
@@ -598,6 +608,33 @@ constexpr BoardProfile XTEINK_X3 = {
     NO_SDMMC,
     {20, 0, 400000, 0x55, 0}};  // BQ27220 fuel gauge (0x55) on SDA20/SCL0; no charger IC
 
+// --- Xteink X3, newer production run — UC8279d controller --------------------
+// Same board, glass and pinout as XTEINK_X3; only the panel controller differs,
+// so every field below is XTEINK_X3's except the board id, name, controller and
+// SPI clock. UC8279 serial write timing is rated to 20 MHz.
+constexpr BoardProfile XTEINK_X3_UC8279 = {
+    Board::XteinkX3Uc8279,
+    "xteink_x3_uc8279",
+    InputStyle::XteinkAdcLadder,
+    DisplayController::UC8279,
+    792,
+    528,
+    {8, 10, 21, 4, 5, 6, PIN_UNASSIGNED},
+    20000000,  // displaySpiHz
+    {PIN_UNASSIGNED, 7, PIN_UNASSIGNED, 12, PIN_UNASSIGNED, false, 0},
+    {0, 1, 2, 3, 4, 5, 3, false},
+    0,
+    PIN_UNASSIGNED,
+    2.0f,
+    20,
+    NO_TOUCH,
+    NO_FRONTLIGHT,
+    NO_AUDIO,
+    NO_LEDS,
+    NO_FLIP,
+    NO_SDMMC,
+    {20, 0, 400000, 0x55, 0}};  // BQ27220 fuel gauge (0x55) on SDA20/SCL0; no charger IC
+
 // --- M5Stack PaperColor — ESP32-S3, ED2208 color panel, M5PM1 PMIC -----------
 constexpr BoardProfile M5STACK_PAPER_COLOR = {Board::M5StackPaperColor,
                                               "m5stack_papercolor",
@@ -910,6 +947,9 @@ inline bool selectDevice(Board which) {
 #if FREEINK_DEVICE_X3
     case Board::XteinkX3:
       ACTIVE = XTEINK_X3;
+      return true;
+    case Board::XteinkX3Uc8279:
+      ACTIVE = XTEINK_X3_UC8279;
       return true;
 #endif
 #if FREEINK_DEVICE_M5

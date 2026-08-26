@@ -25,6 +25,7 @@
 #endif
 #if FREEINK_DRIVER_UC8253_X3
 #include "driver/Uc8253X3Driver.h"
+#include "driver/Uc8279Driver.h"
 #endif
 #if FREEINK_DRIVER_ED2208
 #include "driver/Ed2208M5Driver.h"
@@ -67,7 +68,12 @@ void FreeInkDisplay::setDisplayX3() {
   // Swap the active profile to X3's sibling so resolution (and any board-level
   // reads, e.g. touch mapping) come from BoardProfile, like every other device.
   // Called before begin(), so the X3 driver singleton sees 792x528 at construction.
-  BoardConfig::selectDevice(BoardConfig::Board::XteinkX3);
+  // XteinkDetect may already have selected the UC8279d sibling; selecting the
+  // UC8253 profile here would clobber it and put us back on the wrong driver.
+  // Both profiles are 792x528, so the geometry below is correct either way.
+  if (BoardConfig::ACTIVE.board != BoardConfig::Board::XteinkX3Uc8279) {
+    BoardConfig::selectDevice(BoardConfig::Board::XteinkX3);
+  }
   displayWidth = X3_DISPLAY_WIDTH;
   displayHeight = X3_DISPLAY_HEIGHT;
   displayWidthBytes = X3_DISPLAY_WIDTH_BYTES;
@@ -97,8 +103,18 @@ void FreeInkDisplay::selectDriver() {
 #endif
       break;
 #endif
-#if FREEINK_DRIVER_UC8253_X3
-    case PanelSel::X3: _driver = &uc8253X3Driver(); break;
+#if FREEINK_DRIVER_UC8253_X3 || FREEINK_DRIVER_UC8279
+    case PanelSel::X3:
+#if FREEINK_DRIVER_UC8279
+      // Newer X3 units carry a UC8279d. XteinkDetect's controller probe has
+      // already swapped the active profile, so trust the profile, not the flag.
+      if (BoardConfig::ACTIVE.displayController == BoardConfig::DisplayController::UC8279) {
+        _driver = &uc8279Driver();
+        break;
+      }
+#endif
+      _driver = &uc8253X3Driver();
+      break;
 #endif
     case PanelSel::X4:
     default:
