@@ -916,6 +916,21 @@ static void pumpDevConsole() {
                     gfx.height());
       continue;
     }
+    if (!strncmp(line, "text ", 5)) {
+      // Bench-only: draw arbitrary UTF-8 in all three UI fonts, straight into
+      // the framebuffer (like `cal`), so glass-twin can grab an exact proof of
+      // glyph coverage — added for the Cyrillic/Greek extension (flowe-os#3).
+      SCENES.waitFlushIdle();
+      gfx.clear();
+      const int cx = gfx.width() / 2;
+      const int cy = gfx.height() / 2;
+      gfx.drawTextCentered(kFontBold, cx, cy - 60, line + 5);
+      gfx.drawTextCentered(kFontRegular, cx, cy, line + 5);
+      gfx.drawTextCentered(kFontSmall, cx, cy + 60, line + 5);
+      gfx.flush(EInkDisplay::FULL_REFRESH);
+      Serial.println("[xphone-os] devcon: text — run 'redraw' to restore the UI");
+      continue;
+    }
     if (!strcmp(line, "redraw")) {
       // Force a clean full repaint of the live scene (after `cal`, or to make
       // a capture reproducible without rebooting). The white FULL flush first

@@ -156,6 +156,7 @@ class ReaderScene : public Scene {
   void renderBookList(Gfx& gfx);
   void renderTile(Gfx& gfx, int visibleIndex);
   void renderMessage(Gfx& gfx, const char* line1, const char* line2);
+  void renderCoverageNotice(Gfx& gfx);
 
   State _state = State::BookList;
   Work _work = Work::None;
@@ -199,6 +200,12 @@ class ReaderScene : public Scene {
   int _prefetchAttemptedSpine = -1;  // never retry a failed/checked prefetch
   int _pageLoadRetries = 0;
   const char* _errorMsg = "";
+  // Glyph-coverage notice (flowe-os#3 UX): when the first indexed chapter of
+  // a raw epub is largely outside the built-in fonts (Hebrew, Arabic, CJK),
+  // one full-screen notice points the user at the app's compile path instead
+  // of pages of replacement boxes. Any button reads anyway.
+  bool _coverageChecked = false;
+  bool _coverageNotice = false;
 
   // 0.7 reader chrome v2: the MENU is a full page (CONFIRM opens while
   // reading); Text size and Go-to-page are strips OVER the book page so

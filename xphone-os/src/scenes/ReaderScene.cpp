@@ -451,8 +451,10 @@ const char* const* ReaderScene::softKeys() const {
   static constexpr const char* kListEmpty[4] = {"BACK", nullptr, nullptr, nullptr};
   static constexpr const char* kLife[4] = {"BACK", nullptr, nullptr, nullptr};
   const bool land = _landscape;
+  static constexpr const char* kNotice[4] = {"BACK", "READ", nullptr, nullptr};
   switch (_state) {
     case State::Reading:
+      if (_coverageNotice) return kNotice;
       switch (_menu) {
         case MenuView::Page:      return land ? kMenuPageL : kMenuPage;
         case MenuView::SizeStrip: return kSizeStrip;
@@ -532,6 +534,8 @@ void ReaderScene::workOpenBook() {
   // Leaving the grid: hand the ~58KB cover-decoder scratch back to the heap
   // before anything else claims it.
   reader::CoverThumb::releaseScratch();
+  _coverageChecked = false;
+  _coverageNotice = false;
   if (endsWithFbpCI(_bookPath.c_str())) {
     // Reading keeps the radio (2026-08-18). Bring the stack up NOW, into
     // the cleanest heap — BEFORE the book's state exists, never beside it
@@ -1066,6 +1070,19 @@ void ReaderScene::workBuildSection() {
   }
   Serial.printf("[xphone-os] reader: indexed spine %d: %u pages in %lu ms, heap=%u\n", _spine,
                 _section->pageCount, static_cast<unsigned long>(millis() - t0), ESP.getFreeHeap());
+  // First indexed chapter of this book: if most of its text is outside the
+  // built-in fonts (Hebrew, Arabic, CJK), interpose the sync-with-app notice
+  // instead of pages of replacement boxes. 200-glyph floor keeps a short
+  // front-matter chapter from deciding for the whole book.
+  if (!_coverageChecked && _measure && _measure->glyphsSeen() >= 200) {
+    _coverageChecked = true;
+    if (_measure->glyphsMissing() * 10 >= _measure->glyphsSeen()) {
+      _coverageNotice = true;
+      Serial.printf("[xphone-os] reader: %lu of %lu glyphs not in the built-in fonts; showing sync notice\n",
+                    static_cast<unsigned long>(_measure->glyphsMissing()),
+                    static_cast<unsigned long>(_measure->glyphsSeen()));
+    }
+  }
   applyPendingPage();
   _state = State::Reading;
   reader::ReadingStats::sessionStart(_bookPath);
@@ -1277,6 +1294,17 @@ void ReaderScene::handleInput(Input& in) {
       return;
 
     case State::Reading:
+      if (_coverageNotice) {
+        if (in.wasPressed(Btn::Back)) {
+          _coverageNotice = false;
+          enterBookList();
+        } else if (in.wasPressed(Btn::Confirm) || fwdKey(in) || backKey(in) ||
+                   in.wasPressed(Btn::Up) || in.wasPressed(Btn::Down)) {
+          _coverageNotice = false;
+          markDirty();
+        }
+        return;
+      }
       if (_menu != MenuView::None) {
         handleMenuInput(in);
         return;
@@ -1844,9 +1872,33 @@ void ReaderScene::renderBody(Gfx& gfx) {
       renderBookList(gfx);
       return;
     case State::Reading:
+      if (_coverageNotice) {
+        renderCoverageNotice(gfx);
+        return;
+      }
       renderReading(gfx);
       return;
   }
+}
+
+// Full-screen interstitial before the first page of a book the built-in
+// fonts mostly cannot draw. ASCII copy only — this screen must render with
+// the very fonts that just came up short.
+void ReaderScene::renderCoverageNotice(Gfx& gfx) {
+  const int cw = contentRight(gfx, 0);
+  const int textW = cw - 2 * kListMarginX;
+  int y = gfx.height() / 5;
+  gfx.drawTextCentered(kFontBold, cw / 2, y, "This book needs the app");
+  y += gfx.lineHeight(kFontBold) + 12;
+  const int lines = gfx.drawTextWrapped(
+      kFontRegular, kListMarginX, y,
+      "This device cannot draw most of the characters in this book on its own. "
+      "Sync the book with the Flowe app on your phone. The app builds a version "
+      "with full language support.",
+      textW, 8);
+  y += lines * gfx.lineHeight(kFontRegular) + 16;
+  gfx.drawTextWrapped(kFontSmall, kListMarginX, y,
+                      "READ opens it anyway. Missing characters show as boxes.", textW, 2);
 }
 
 void ReaderScene::renderMessage(Gfx& gfx, const char* line1, const char* line2) {

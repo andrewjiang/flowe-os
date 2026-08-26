@@ -17,11 +17,20 @@ namespace reader {
 // exactly what was measured.
 class TextMeasure {
   const EpdFontFamily& family;
+  // Glyph-coverage tally, filled as layout measures words (flowe-os#3 UX):
+  // words are re-measured during wrapping, so the counts over-sample, but the
+  // RATIO stays representative — its only use is the "sync this book with the
+  // app" notice threshold.
+  mutable uint32_t _glyphsSeen = 0;
+  mutable uint32_t _glyphsMissing = 0;
 
  public:
   explicit TextMeasure(const EpdFontFamily& family) : family(family) {}
 
   const EpdFontFamily& getFamily() const { return family; }
+
+  uint32_t glyphsSeen() const { return _glyphsSeen; }
+  uint32_t glyphsMissing() const { return _glyphsMissing; }
 
   int getSpaceWidth(int fontId, EpdFontFamily::Style style = EpdFontFamily::REGULAR) const;
   int getSpaceAdvance(int fontId, uint32_t leftCp, uint32_t rightCp, EpdFontFamily::Style style) const;

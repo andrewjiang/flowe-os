@@ -54,6 +54,10 @@ int TextMeasure::getTextAdvanceX(const int fontId, const char* text, EpdFontFami
       widthPx += fp4::toPixel(prevAdvanceFP + kernFP);           // snap 12.4 fixed-point to nearest pixel
     }
 
+    if (cp > 0x20) {
+      _glyphsSeen++;
+      if (!family.covers(cp, style)) _glyphsMissing++;
+    }
     const EpdGlyph* glyph = family.getGlyph(cp, style);
     prevAdvanceFP = glyph ? glyph->advanceX : 0;
     if ((style & (EpdFontFamily::SUP | EpdFontFamily::SUB)) != 0) {

@@ -11,6 +11,10 @@ class EpdFont {
   void getTextDimensions(const char* string, int* w, int* h) const;
 
   const EpdGlyph* getGlyph(uint32_t cp) const;
+  // Interval-table membership only: true when the font natively carries cp.
+  // Unlike getGlyph, never falls back to U+FFFD and never probes the
+  // on-demand miss handler — coverage checks must be side-effect free.
+  bool covers(uint32_t cp) const;
 
   /// Returns the kerning adjustment (4.4 fixed-point in pixels) between two codepoints.
   /// Returns 0 if no kerning data exists for the pair.
