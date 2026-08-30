@@ -161,7 +161,7 @@ void TodayScene::requestSync() {
 }
 
 const char* const* TodayScene::softKeys() const {
-  static constexpr const char* kFull[4] = {"BACK", "SYNC", SoftKey::Left, SoftKey::Right};
+  static constexpr const char* kFull[4] = {"BACK", "SYNC", SoftKey::Up, SoftKey::Down};
   static constexpr const char* kEmpty[4] = {"BACK", "SYNC", nullptr, nullptr};
   return TODAY_STORE.hasSnapshot() ? kFull : kEmpty;
 }

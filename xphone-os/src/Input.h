@@ -107,6 +107,17 @@ class Input {
   // these two cover every ladder-button behavior (a real long-press also
   // suppresses its release-tap, which injection matches by setting only one
   // bit). Guarded by USB-host presence at the call site.
+  // Bench-only: hold `b` down for `ms`, as if a thumb were on it. Needed
+  // because injectTap only latches an edge — nothing in the tap/long-press
+  // vocabulary can express "still held", which is what auto-repeat reads.
+  void injectHold(Btn b, uint32_t ms) {
+    portENTER_CRITICAL(&_mux);
+    _holdInjectMask |= (1u << static_cast<uint8_t>(b));
+    _holdInjectUntilMs = millis() + ms;
+    _pendingAny = true;
+    portEXIT_CRITICAL(&_mux);
+  }
+
   void injectTap(Btn b) {
     portENTER_CRITICAL(&_mux);
     _pendingTap |= (1u << static_cast<uint8_t>(b));
@@ -175,7 +186,17 @@ class Input {
     _pendingLong |= longBits;
     if (any) _pendingAny = true;
     portEXIT_CRITICAL(&_mux);
-    _levelMask = levels;
+    // Bench: a synthetic HOLD (see injectHold) ORs into the published level
+    // for its window, so level-driven behaviour — the chapter list's
+    // hold-to-jump, say — is testable from the dev console. Real presses are
+    // never suppressed; this only ever adds bits.
+    uint8_t injected = 0;
+    if (_holdInjectMask && static_cast<int32_t>(millis() - _holdInjectUntilMs) < 0) {
+      injected = _holdInjectMask;
+    } else {
+      _holdInjectMask = 0;
+    }
+    _levelMask = levels | injected;
     _powerDown = _mgr.isPressed(InputManager::BTN_POWER);
     _powerHeldMs = _mgr.getPowerButtonHeldTime();
   }
@@ -196,6 +217,8 @@ class Input {
 
   // Published snapshots (volatile single-word, lock-free reads).
   volatile uint8_t _levelMask = 0;
+  volatile uint8_t _holdInjectMask = 0;   // bench hold injection (see injectHold)
+  volatile uint32_t _holdInjectUntilMs = 0;
   volatile bool _powerDown = false;
   volatile unsigned long _powerHeldMs = 0;
 

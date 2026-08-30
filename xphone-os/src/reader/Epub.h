@@ -23,6 +23,11 @@ class Epub {
   std::string filepath;
   // the base path for items in the EPUB file
   std::string contentBasePath;
+  // Set during the OPF pass; consumed by the TOC pass below. Empty when the
+  // book declares no table of contents, which is common enough that the
+  // reader must fall back to spine sections rather than treat it as an error.
+  mutable std::string tocNcxItem;
+  mutable std::string tocNavItem;
   // Unique cache key based on filepath
   std::string cachePath;
   // Spine cache (book.bin v8; TOC slots stay zeroed)
@@ -58,9 +63,22 @@ class Epub {
   // and fills *href only when the book has a cover.
   bool getCoverHref(std::string* href) const;
   bool readItemContentsToStream(const std::string& itemHref, Print& out, size_t chunkSize) const;
+  // Streams the declared TOC document through the matching parser, which
+  // appends entries to the cache. EPUB 2 (.ncx) is tried first because books
+  // that ship both keep the richer tree there.
+  bool parseTocNcxFile() const;
+  bool parseTocNavFile() const;
   bool getItemSize(const std::string& itemHref, size_t* size) const;
   BookMetadataCache::SpineEntry getSpineItem(int spineIndex) const;
   int getSpineItemsCount() const;
+  // Real chapters, when the book declares them. Zero means no usable TOC and
+  // the caller should fall back to numbered spine sections.
+  int getTocItemsCount() const;
+  BookMetadataCache::TocEntry getTocItem(int tocIndex) const;
+  // Spine index a TOC entry opens at, and the TOC entry covering a spine
+  // index (-1 when unknown) — the two lookups the chapter list needs.
+  int getSpineIndexForTocIndex(int tocIndex) const;
+  int getTocIndexForSpineIndex(int spineIndex) const;
   size_t getCumulativeSpineItemSize(int spineIndex) const;
   int getSpineIndexForTextReference() const;
 

@@ -55,6 +55,12 @@ class ContentOpfParser final : public Print {
   std::string author;
   std::string language;
   std::string textReferenceHref;
+  // Where the book's real table of contents lives. EPUB 2 books declare an
+  // NCX manifest item (media-type application/x-dtbncx+xml); EPUB 3 books
+  // mark a nav document with properties="nav". Restored with the TOC
+  // parsers — the spine alone cannot tell a chapter from a title page.
+  std::string tocNcxHref;
+  std::string tocNavHref;
   // Cover image href (resolved against baseContentPath, uri-decoded and
   // normalised like spine hrefs). Precedence: properties="cover-image" >
   // <meta name="cover"> id match > href containing "cover". Empty = no cover.

@@ -254,6 +254,11 @@ class CompanionBleService final {
   // encryption-change) and the main loop (processPending), so every touch
   // holds stateMutex.
   uint16_t secConnHandle = 0xffff;
+  // The handle encryption actually completed on, so armSecurity() can tell a
+  // fresh link from one the stack already secured. A bonded iOS reconnect
+  // encrypts BEFORE the connect callback runs, and armSecurity used to reset
+  // `encrypted` to false regardless — see the comment there.
+  uint16_t securedConnHandle = 0xffff;
   bool encrypted = false;
   bool securityPending = false;
   uint8_t securityAttempts = 0;

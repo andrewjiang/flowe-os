@@ -112,6 +112,9 @@ class ReaderScene : public Scene {
   void openSelectedBook();
   void moveSelection(int delta);
   XpRect listRect() const;
+  // True when the open book has genuine chapters (fbp always; epub only when
+  // it declared a TOC). Drives "Chapters" vs "Sections" wording — see #42.
+  bool hasRealToc() const;
   XpRect tileRect(int visibleIndex) const;
 
   // Input/render helpers.
@@ -220,6 +223,10 @@ class ReaderScene : public Scene {
   bool _orientNote = false;
   int _tocSel = 0;     // cursor in the Chapters list
   int _tocScroll = 0;  // first visible Chapters row
+  // Chapters auto-repeat (see handleInput): which direction is held, when the
+  // next repeat is due, and whether a held scroll moved without painting yet.
+  Btn _tocRepeatFrom = Btn::COUNT;
+  uint32_t _tocRepeatNextMs = 0;
   int _gotoPage = 0;   // 0-based target while the Go-to strip is open
   // Bookmarks for the open book (loaded on open, kept in sync on edit).
   reader::Bookmarks::Mark _marks[reader::Bookmarks::kMax];

@@ -65,10 +65,10 @@ const char* const* NotificationsScene::softKeys() const {
   // one stray press can no longer wipe the list. With the header SYNC pill
   // selected (_sel == -1) the CONFIRM tab relabels to SYNC — the bar repaints
   // with every scene repaint, so the label follows the cursor for free.
-  static constexpr const char* kList[4] = {"BACK", "OPEN", SoftKey::Left, SoftKey::Right};
-  static constexpr const char* kListSync[4] = {"BACK", "SYNC", SoftKey::Left, SoftKey::Right};
+  static constexpr const char* kList[4] = {"BACK", "OPEN", SoftKey::Up, SoftKey::Down};
+  static constexpr const char* kListSync[4] = {"BACK", "SYNC", SoftKey::Up, SoftKey::Down};
   static constexpr const char* kListSyncEmpty[4] = {"BACK", "SYNC", nullptr, nullptr};
-  static constexpr const char* kDetail[4] = {"BACK", "CLEAR", SoftKey::Left, SoftKey::Right};
+  static constexpr const char* kDetail[4] = {"BACK", "CLEAR", SoftKey::Up, SoftKey::Down};
   if (_view == View::Detail) return kDetail;
   if (_sel < 0) return NOTIFICATION_STORE.count() > 0 ? kListSync : kListSyncEmpty;
   return kList;

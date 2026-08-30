@@ -133,6 +133,9 @@ static void bootTrace(const char* stage) {
   f.close();
 }
 
+// The same breadcrumb, reachable from the scenes (see BootTrace.h).
+void xpTrace(const char* stage) { bootTrace(stage); }
+
 // M4.2 wake diagnostic: esp_reset_reason() -> short label. Captured at the very
 // top of boot() so the About scene can show whether the X3 power-button wake is
 // a genuine deep-sleep resume (DEEPSLEEP) or a full power-on reset (POWERON) —
@@ -173,6 +176,12 @@ static void boot() {
   // I2C parts (gauge/RTC/IMU) and sets BoardConfig::ACTIVE; it must run
   // BEFORE SD + display bring-up (XteinkDetect.h contract).
   gDeviceIsX3 = freeink::selectXteinkDevice();
+  // Say WHICH build this is, before anything can hang. A stuck unit cannot
+  // reach the About screen, so until now a field report could not name its
+  // firmware at all — and the panel fix for newer X3 units is exactly the
+  // kind of thing where "which version are you on" IS the whole diagnosis.
+  // The web flasher reads this line straight off the USB serial.
+  Serial.printf("[xphone-os] flowe %s (%s)\n", XPHONE_VERSION, XPHONE_GIT_REV_STR);
   Serial.printf("[xphone-os] boot: xteink detect -> %s\n", gDeviceIsX3 ? "X3" : "X4");
   if (gDeviceIsX3) {
     display.setDisplayX3();
@@ -973,11 +982,17 @@ static void pumpDevConsole() {
     if (had <= 4 || strncmp(line, "btn ", 4) != 0) continue;
     char* n = line + 4;
     bool lng = false;
+    uint32_t holdMs = 0;
     if (char* sp = strchr(n, ' ')) {  // optional modifier after the name
       *sp = 0;
       const char* mod = sp + 1;
+      // "long"/"hold" = the one-shot long-press EDGE. "down <ms>" = the button
+      // physically held for that long, which is the only way to exercise
+      // level-driven behaviour like the chapter list's hold-to-jump.
       if (strcmp(mod, "long") == 0 || strcmp(mod, "hold") == 0) lng = true;
+      else if (strncmp(mod, "down", 4) == 0) holdMs = strtoul(mod + 4, nullptr, 10);
       else continue;
+      if (holdMs == 0 && !lng) continue;
     }
     Btn b;
     if (!strcmp(n, "up")) b = Btn::Up;
@@ -987,9 +1002,11 @@ static void pumpDevConsole() {
     else if (!strcmp(n, "confirm") || !strcmp(n, "open") || !strcmp(n, "size")) b = Btn::Confirm;
     else if (!strcmp(n, "back") || !strcmp(n, "books")) b = Btn::Back;
     else continue;
-    if (lng) input.injectLong(b);
+    if (holdMs) input.injectHold(b, holdMs);
+    else if (lng) input.injectLong(b);
     else input.injectTap(b);
-    Serial.printf("[xphone-os] devcon: btn %s%s\n", n, lng ? " long" : "");
+    if (holdMs) Serial.printf("[xphone-os] devcon: btn %s held %lums\n", n, (unsigned long)holdMs);
+    else Serial.printf("[xphone-os] devcon: btn %s%s\n", n, lng ? " long" : "");
   }
 }
 

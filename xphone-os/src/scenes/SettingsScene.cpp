@@ -92,7 +92,7 @@ void SettingsScene::onEnter() {
 }
 
 const char* const* SettingsScene::softKeys() const {
-  static constexpr const char* kListKeys[4] = {"BACK", "OPEN", SoftKey::Left, SoftKey::Right};
+  static constexpr const char* kListKeys[4] = {"BACK", "OPEN", SoftKey::Up, SoftKey::Down};
   static constexpr const char* kConfirmKeys[4] = {"NO", "YES", nullptr, nullptr};
   static constexpr const char* kIconKeys[4] = {"BACK", nullptr, SoftKey::Left, SoftKey::Right};
   if (_view == View::ConfirmFlash || _view == View::ConfirmRestart) return kConfirmKeys;

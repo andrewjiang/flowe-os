@@ -680,8 +680,27 @@ void CompanionBleService::armSecurity(uint16_t connHandle) {
   ensureMutex();
   xSemaphoreTake(stateMutex, portMAX_DELAY);
   secConnHandle = connHandle;
-  encrypted = false;
-  securityPending = true;
+  // The callbacks do NOT arrive in the order this code once assumed. A
+  // bonded iPhone reconnects and the stack encrypts immediately, so
+  // ENC_CHANGE lands BEFORE this connect callback. Observed on an X3,
+  // 2026-08-28, in this order within one second:
+  //
+  //   BLE authentication complete conn=1 encrypted=1 bonded=1
+  //   BLE link encrypted bonded=1        <- encrypted = true
+  //   BLE connected                      <- this function, encrypted = false
+  //   Security initiate conn=1 rc=2 (already running)
+  //
+  // Resetting `encrypted` unconditionally re-armed the pump, which then
+  // called ble_gap_security_initiate on a link that was already secure.
+  // Sometimes iOS tolerated it; often the link dropped two seconds later
+  // with ENC_CHANGE status=7 (ENOTCONN), and the device reconnected and did
+  // it again. Five connects and six drops in one minute, delivering nothing.
+  //
+  // Android never showed it: that link encrypts after connect, so the order
+  // this code assumed happens to hold there.
+  const bool alreadySecure = (securedConnHandle == connHandle);
+  encrypted = alreadySecure;
+  securityPending = !alreadySecure;
   securityAttempts = 0;
   securityDueAtMs = millis() + 600;
   xSemaphoreGive(stateMutex);
@@ -691,6 +710,9 @@ void CompanionBleService::disarmSecurity() {
   ensureMutex();
   xSemaphoreTake(stateMutex, portMAX_DELAY);
   secConnHandle = 0xffff;
+  // Must be cleared: NimBLE reuses handles (the churn alternated 1, 2, 1, 2),
+  // so a stale value would make the NEXT connection look already-secure.
+  securedConnHandle = 0xffff;
   encrypted = false;
   securityPending = false;
   xSemaphoreGive(stateMutex);
@@ -716,6 +738,7 @@ void CompanionBleService::handleEncryptionChange(ble_gap_conn_desc* desc) {
     ensureMutex();
     xSemaphoreTake(stateMutex, portMAX_DELAY);
     encrypted = true;
+    securedConnHandle = desc->conn_handle;
     securityPending = false;
     xSemaphoreGive(stateMutex);
     // A repeat connection with an existing bond lands here with encrypted=1
@@ -822,31 +845,50 @@ void CompanionBleService::processPending() {
   xSemaphoreGive(stateMutex);
 
   if (wantSecurity && millis() >= dueAtMs) {
-    const int rc = ble_gap_security_initiate(handle);
-    if (rc == 0 || rc == BLE_HS_EALREADY) {
-      // 0: pairing/encryption started, wait for ENC_CHANGE. EALREADY: the
-      // framework's on-connect attempt is already in flight — same wait.
-      LOG_INF("X4CMP", "Security initiate conn=%u rc=%d (%s)", handle, rc, rc == 0 ? "started" : "already running");
+    // Ask the STACK, not our own flags, before initiating. This is the real
+    // invariant — never renegotiate security on a link that already has it —
+    // and it holds whatever order the callbacks arrive in. armSecurity() now
+    // avoids the case that caused this, but a flag race is exactly the kind
+    // of bug that comes back, and the cost of being sure is one lookup.
+    ble_gap_conn_desc secDesc;
+    const bool alreadySecure =
+        ble_gap_conn_find(handle, &secDesc) == 0 && secDesc.sec_state.encrypted;
+
+    if (alreadySecure) {
       xSemaphoreTake(stateMutex, portMAX_DELAY);
+      encrypted = true;
+      securedConnHandle = handle;
       securityPending = false;
       xSemaphoreGive(stateMutex);
-      setStatus("Pairing with iPhone...");
+      LOG_INF("X4CMP", "Security already established conn=%u; pump stood down", handle);
+      setStatus("Paired & encrypted");
     } else {
-      LOG_ERR("X4CMP", "ble_gap_security_initiate conn=%u failed rc=%d", handle, rc);
-      bool retry = false;
-      xSemaphoreTake(stateMutex, portMAX_DELAY);
-      if (securityAttempts == 0) {
-        ++securityAttempts;
-        securityDueAtMs = millis() + 2000;
-        retry = true;
-      } else {
+      const int rc = ble_gap_security_initiate(handle);
+      if (rc == 0 || rc == BLE_HS_EALREADY) {
+        // 0: pairing/encryption started, wait for ENC_CHANGE. EALREADY: the
+        // framework's on-connect attempt is already in flight — same wait.
+        LOG_INF("X4CMP", "Security initiate conn=%u rc=%d (%s)", handle, rc, rc == 0 ? "started" : "already running");
+        xSemaphoreTake(stateMutex, portMAX_DELAY);
         securityPending = false;
-      }
-      xSemaphoreGive(stateMutex);
-      if (!retry) {
-        char failMsg[48];
-        snprintf(failMsg, sizeof(failMsg), "Pairing failed (rc=%d)", rc);
-        setStatus(failMsg);
+        xSemaphoreGive(stateMutex);
+        setStatus("Pairing with iPhone...");
+      } else {
+        LOG_ERR("X4CMP", "ble_gap_security_initiate conn=%u failed rc=%d", handle, rc);
+        bool retry = false;
+        xSemaphoreTake(stateMutex, portMAX_DELAY);
+        if (securityAttempts == 0) {
+          ++securityAttempts;
+          securityDueAtMs = millis() + 2000;
+          retry = true;
+        } else {
+          securityPending = false;
+        }
+        xSemaphoreGive(stateMutex);
+        if (!retry) {
+          char failMsg[48];
+          snprintf(failMsg, sizeof(failMsg), "Pairing failed (rc=%d)", rc);
+          setStatus(failMsg);
+        }
       }
     }
   }

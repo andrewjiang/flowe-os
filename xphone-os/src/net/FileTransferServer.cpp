@@ -527,6 +527,37 @@ void FileTransferServer::handleDelete() {
     _server->send(404, "text/plain", msg);
     return;
   }
+  // A folder can only be removed when it is EMPTY, and SdMan.remove refuses
+  // directories outright, so it needs its own path. Empty-only is the whole
+  // safety story here: SdMan.removeDir deletes recursively, and a delete
+  // that silently took a folder full of books with it is exactly the
+  // massacre removeBookSiblings was written to prevent. An upload addressed
+  // to "/books/name.fbp" treats that as the destination FOLDER and creates
+  // it, so stray empty folders are a thing that really happens and the
+  // phone needs a way to clear them.
+  {
+    FsFile probe = SdMan.open(path, O_RDONLY);
+    const bool isDir = probe && probe.isDir();
+    bool empty = true;
+    if (isDir) {
+      FsFile child;
+      if (child.openNext(&probe, O_RDONLY)) {
+        empty = false;
+        child.close();
+      }
+    }
+    if (probe) probe.close();
+    if (isDir) {
+      if (!empty) {
+        _server->send(409, "text/plain", "Folder is not empty");
+        return;
+      }
+      const bool gone = SdMan.removeDir(path);
+      _server->send(gone ? 200 : 500, "text/plain", gone ? "Deleted" : "Delete failed");
+      return;
+    }
+  }
+
   const bool isBook = strncmp(path, "/books/", 7) == 0 &&
                       (hasEpubExtension(path) || hasFbpExtension(path));
   if (isBook) removeSidecars(path);

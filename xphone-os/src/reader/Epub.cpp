@@ -7,6 +7,8 @@
 
 #include "ContainerParser.h"
 #include "ContentOpfParser.h"
+#include "TocNavParser.h"
+#include "TocNcxParser.h"
 #include "ReaderFsUtils.h"
 #include "ReaderLog.h"
 
@@ -78,6 +80,8 @@ bool Epub::parseContentOpf(BookMetadataCache::BookMetadata& bookMetadata) {
   bookMetadata.author = opfParser.author;
   bookMetadata.language = opfParser.language;
   bookMetadata.textReferenceHref = opfParser.textReferenceHref;
+  tocNcxItem = opfParser.tocNcxHref;
+  tocNavItem = opfParser.tocNavHref;
   // coverItemHref intentionally left empty so book.bin v8 stays byte-identical
   // to R1 output; the cover href lives in the cover.href sidecar instead.
   writeCoverSidecar(opfParser.coverHref);
@@ -217,16 +221,26 @@ bool Epub::load(const bool buildIfMissing) {
   }
   LOG_DBG("EBP", "OPF pass completed in %lu ms", millis() - opfStart);
 
-  // TOC Pass — TOC parsers are removed for R1 (spine-linear); the pass still
-  // runs so book.bin keeps its (empty, zeroed) v8 TOC slots.
+  // TOC Pass. A spine lists every file in reading order — cover, title page,
+  // copyright, then chapters — so numbering it gave "Chapter 6" for the text's
+  // chapter one (#42). The book's real chapter names live in its declared TOC
+  // document, which is what every other reader shows. Either flavour is fine;
+  // a book with neither keeps an empty TOC and the reader falls back to
+  // numbered sections.
+  const uint32_t tocStart = millis();
   if (!bookMetadataCache->beginTocPass()) {
     LOG_ERR("EBP", "Could not begin writing toc pass");
     return false;
   }
+  bool tocParsed = false;
+  if (!tocNcxItem.empty()) tocParsed = parseTocNcxFile();
+  if (!tocParsed && !tocNavItem.empty()) tocParsed = parseTocNavFile();
   if (!bookMetadataCache->endTocPass()) {
     LOG_ERR("EBP", "Could not end writing toc pass");
     return false;
   }
+  LOG_DBG("EBP", "TOC pass completed in %lu ms (%d entries)", millis() - tocStart,
+          bookMetadataCache->getTocCount());
 
   // Close the cache files
   if (!bookMetadataCache->endWrite()) {
@@ -313,6 +327,82 @@ const std::string& Epub::getLanguage() const {
   return bookMetadataCache->coreMetadata.language;
 }
 
+// Restored with the TOC parsers (dropped in 622fc5f). The TOC document is
+// extracted from the zip to a temp file first: expat needs a forward-only
+// stream and the zip reader is happier writing whole files than seeking.
+bool Epub::parseTocNcxFile() const {
+  if (tocNcxItem.empty()) return false;
+  LOG_DBG("EBP", "Parsing toc ncx: %s", tocNcxItem.c_str());
+
+  const auto tmpPath = getCachePath() + "/toc.ncx.tmp";
+  HalFile tmp;
+  if (!Storage.openFileForWrite("EBP", tmpPath, tmp)) return false;
+  readItemContentsToStream(tocNcxItem, tmp, 1024);
+  tmp.close();
+  if (!Storage.openFileForRead("EBP", tmpPath, tmp)) return false;
+
+  TocNcxParser ncxParser(contentBasePath, tmp.size(), bookMetadataCache.get());
+  bool ok = ncxParser.setup();
+  if (ok) {
+    const auto buf = static_cast<uint8_t*>(malloc(1024));
+    if (!buf) {
+      LOG_ERR("EBP", "No memory for toc ncx parser");
+      ok = false;
+    } else {
+      while (tmp.available()) {
+        const auto readSize = tmp.read(buf, 1024);
+        if (readSize == 0) break;
+        if (ncxParser.write(buf, readSize) != readSize) {
+          LOG_ERR("EBP", "Could not process all toc ncx data");
+          ok = false;
+          break;
+        }
+      }
+      free(buf);
+    }
+  }
+  tmp.close();
+  Storage.remove(tmpPath.c_str());
+  return ok && bookMetadataCache->getTocCount() > 0;
+}
+
+// EPUB 3 books carry the same information as an XHTML <nav> document.
+bool Epub::parseTocNavFile() const {
+  if (tocNavItem.empty()) return false;
+  LOG_DBG("EBP", "Parsing toc nav: %s", tocNavItem.c_str());
+
+  const auto tmpPath = getCachePath() + "/toc.nav.tmp";
+  HalFile tmp;
+  if (!Storage.openFileForWrite("EBP", tmpPath, tmp)) return false;
+  readItemContentsToStream(tocNavItem, tmp, 1024);
+  tmp.close();
+  if (!Storage.openFileForRead("EBP", tmpPath, tmp)) return false;
+
+  TocNavParser navParser(contentBasePath, tmp.size(), bookMetadataCache.get());
+  bool ok = navParser.setup();
+  if (ok) {
+    const auto buf = static_cast<uint8_t*>(malloc(1024));
+    if (!buf) {
+      LOG_ERR("EBP", "No memory for toc nav parser");
+      ok = false;
+    } else {
+      while (tmp.available()) {
+        const auto readSize = tmp.read(buf, 1024);
+        if (readSize == 0) break;
+        if (navParser.write(buf, readSize) != readSize) {
+          LOG_ERR("EBP", "Could not process all toc nav data");
+          ok = false;
+          break;
+        }
+      }
+      free(buf);
+    }
+  }
+  tmp.close();
+  Storage.remove(tmpPath.c_str());
+  return ok && bookMetadataCache->getTocCount() > 0;
+}
+
 bool Epub::readItemContentsToStream(const std::string& itemHref, Print& out, const size_t chunkSize) const {
   if (itemHref.empty()) {
     LOG_DBG("EBP", "Failed to read item, empty href");
@@ -333,6 +423,37 @@ int Epub::getSpineItemsCount() const {
     return 0;
   }
   return bookMetadataCache->getSpineCount();
+}
+
+int Epub::getTocItemsCount() const {
+  if (!bookMetadataCache || !bookMetadataCache->isLoaded()) return 0;
+  return bookMetadataCache->getTocCount();
+}
+
+BookMetadataCache::TocEntry Epub::getTocItem(const int tocIndex) const {
+  if (!bookMetadataCache || !bookMetadataCache->isLoaded()) return {};
+  if (tocIndex < 0 || tocIndex >= bookMetadataCache->getTocCount()) return {};
+  return bookMetadataCache->getTocEntry(tocIndex);
+}
+
+int Epub::getSpineIndexForTocIndex(const int tocIndex) const {
+  return getTocItem(tocIndex).spineIndex;
+}
+
+// The chapter a spine position sits inside: the last TOC entry that opens at
+// or before it. TOC entries are in document order, and several can share one
+// spine file (a book split by chapter has one file per entry; a book in one
+// big file has many entries pointing at spine 0), so this is a scan for the
+// greatest spineIndex <= the target rather than an exact match.
+int Epub::getTocIndexForSpineIndex(const int spineIndex) const {
+  const int n = getTocItemsCount();
+  int best = -1;
+  for (int i = 0; i < n; i++) {
+    const int si = getTocItem(i).spineIndex;
+    if (si >= 0 && si <= spineIndex) best = i;
+    else if (si > spineIndex) break;
+  }
+  return best;
 }
 
 size_t Epub::getCumulativeSpineItemSize(const int spineIndex) const { return getSpineItem(spineIndex).cumulativeSize; }

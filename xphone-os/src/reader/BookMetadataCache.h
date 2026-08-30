@@ -71,6 +71,8 @@ class BookMetadataCache {
   bool beginWrite();
   bool beginContentOpfPass();
   void createSpineEntry(const std::string& href);
+  // Appends one TOC entry, resolving its href to a spine index.
+  void createTocEntry(const std::string& title, const std::string& href, const std::string& anchor, uint8_t level);
   bool endContentOpfPass();
   // TOC parsing is removed for R1 (spine-linear). The TOC pass still runs so
   // the empty toc.bin.tmp exists and book.bin's v8 TOC slots stay zeroed.

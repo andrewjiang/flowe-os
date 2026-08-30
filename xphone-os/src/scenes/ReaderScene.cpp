@@ -1,5 +1,6 @@
 #include "ReaderScene.h"
 
+#include "../BootTrace.h"
 #include "../CpuBoost.h"
 
 // xphone-os Reader R2a — scene over the CrossPoint engine port (src/reader).
@@ -114,6 +115,15 @@ int contentBottom(Gfx& gfx, int margin) {
 // text crossing the selection border.
 constexpr int kListMarginX = 20;
 constexpr int kHeaderH = 46;
+// Chapters list: holding a direction JUMPS five at a time, repainting each
+// jump. The first attempt scrolled one-by-one and stayed silent until the key
+// came up, which read as the button doing nothing at all — worse than the
+// sluggishness it replaced. Five per paint is a step the panel can actually
+// show, so a long list moves quickly AND visibly.
+constexpr uint32_t kTocRepeatDelayMs = 500;  // < the 550 ms long-press threshold, so no dead zone
+constexpr uint32_t kTocRepeatRateMs = 900;   // ~one jump per refresh
+constexpr int kTocJumpStride = 5;
+
 constexpr int kGridCols = 2;
 constexpr int kGridRows = 2;
 // Concept A stats band (docs/plans/2026-07-29-reading-stats-design.md):
@@ -427,20 +437,20 @@ const char* const* ReaderScene::softKeys() const {
   // is the explicit "Close book" row, not a hidden button meaning.
   // SELECT is six letters and will not stack legibly in a landscape tab, so
   // it abbreviates to OK there — the honest fallback, not a crushed word.
-  static constexpr const char* kMenuPage[4] = {"BACK", "SELECT", SoftKey::Left, SoftKey::Right};
-  static constexpr const char* kMenuPageL[4] = {"BACK", "OK", SoftKey::Right, SoftKey::Left};
+  static constexpr const char* kMenuPage[4] = {"BACK", "SELECT", SoftKey::Up, SoftKey::Down};
+  static constexpr const char* kMenuPageL[4] = {"BACK", "OK", SoftKey::Down, SoftKey::Up};
   // Text size is the one pair that is NOT a direction, so it keeps its words
   // in both orientations — an arrow would only say "this way", where "A-" and
   // "A+" say what actually happens. Two characters stack fine in a landscape
   // tab. It is also the one pair that does not swap when the panel turns:
   // "+" belongs on the key that becomes the upper one.
   static constexpr const char* kSizeStrip[4] = {"BACK", "DONE", "A-", "A+"};
-  static constexpr const char* kChapters[4] = {"BACK", "GO", SoftKey::Left, SoftKey::Right};
-  static constexpr const char* kChaptersL[4] = {"BACK", "GO", SoftKey::Right, SoftKey::Left};
+  static constexpr const char* kChapters[4] = {"BACK", "GO", SoftKey::Up, SoftKey::Down};
+  static constexpr const char* kChaptersL[4] = {"BACK", "GO", SoftKey::Down, SoftKey::Up};
   static constexpr const char* kGoTo[4] = {"BACK", "GO", SoftKey::Left, SoftKey::Right};
   static constexpr const char* kGoToL[4] = {"BACK", "GO", SoftKey::Right, SoftKey::Left};
-  static constexpr const char* kMarks[4] = {"BACK", "GO", SoftKey::Left, SoftKey::Right};
-  static constexpr const char* kMarksL[4] = {"BACK", "GO", SoftKey::Right, SoftKey::Left};
+  static constexpr const char* kMarks[4] = {"BACK", "GO", SoftKey::Up, SoftKey::Down};
+  static constexpr const char* kMarksL[4] = {"BACK", "GO", SoftKey::Down, SoftKey::Up};
   // With nothing in the list, GO and the cursor keys do nothing. A tab that
   // does nothing is a lie about the button under it.
   static constexpr const char* kMarksEmpty[4] = {"BACK", nullptr, nullptr, nullptr};
@@ -732,15 +742,72 @@ void ReaderScene::handleMenuInput(Input& in) {
       int count = 0, cur = 0;
       chapterCountAndSel(&count, &cur);
       if (in.wasPressed(Btn::Back)) {
+        _tocRepeatFrom = Btn::COUNT;
         _menu = MenuView::Page;
         markDirty();
-      } else if (in.wasPressed(Btn::Confirm)) {
+        return;
+      }
+      if (in.wasPressed(Btn::Confirm)) {
+        _tocRepeatFrom = Btn::COUNT;
         chapterJump(_tocSel);
-      } else if (count > 0 && (in.wasPressed(Btn::Up) || backKey(in))) {
-        _tocSel = (_tocSel + count - 1) % count;
+        return;
+      }
+      if (count <= 0) return;
+
+      // Long lists were painful: one tap = one move = one ~750 ms full-panel
+      // refresh, and holding the key did nothing (beta report #43).
+      //
+      // Tap = one step. HOLD = jump five, repainting each jump, so a
+      // 40-chapter book is a couple of seconds away and you can still see
+      // where you are.
+      //
+      // The hold is detected from Input::isPressed()'s debounced LEVEL, not
+      // from a tap edge: a tap only fires on RELEASE, so arming the repeat
+      // from one meant a genuine press-and-hold never repeated at all. (That
+      // was the first version of this fix, and it shipped doing nothing —
+      // caught by injecting a real hold from the dev console.)
+      const Btn upBtn = dirSwap() ? Btn::Right : Btn::Left;
+      const Btn downBtn = dirSwap() ? Btn::Left : Btn::Right;
+      const uint32_t nowMs = millis();
+
+      // Single steps wrap (a 3-chapter book cycles naturally); five-at-a-time
+      // jumps CLAMP, because leaping from chapter 2 to the end of the book is
+      // disorienting rather than helpful.
+      auto step = [&](int delta) {
+        if (delta == 1 || delta == -1) {
+          _tocSel = (_tocSel + count + delta) % count;
+          return;
+        }
+        int next = _tocSel + delta;
+        if (next < 0) next = 0;
+        if (next > count - 1) next = count - 1;
+        _tocSel = next;
+      };
+
+      const bool upHeld = in.isPressed(Btn::Up) || in.isPressed(upBtn);
+      const bool downHeld = in.isPressed(Btn::Down) || in.isPressed(downBtn);
+
+      if (!upHeld && !downHeld) {
+        _tocRepeatFrom = Btn::COUNT;  // nothing held: disarm
+      } else {
+        const Btn dir = upHeld ? Btn::Up : Btn::Down;
+        if (_tocRepeatFrom != dir) {  // press edge (or direction changed)
+          _tocRepeatFrom = dir;
+          _tocRepeatNextMs = nowMs + kTocRepeatDelayMs;
+        } else if (static_cast<int32_t>(nowMs - _tocRepeatNextMs) >= 0) {
+          step(upHeld ? -kTocJumpStride : kTocJumpStride);
+          _tocRepeatNextMs = nowMs + kTocRepeatRateMs;
+          markDirty();  // every jump paints: five rows is a visible move
+        }
+      }
+
+      // Discrete taps: one step, painted at once. A tap arrives on release,
+      // and only when the press was short enough that no jump ran.
+      if (in.wasPressed(Btn::Up) || in.wasPressed(upBtn)) {
+        step(-1);
         markDirty();
-      } else if (count > 0 && (in.wasPressed(Btn::Down) || fwdKey(in))) {
-        _tocSel = (_tocSel + 1) % count;
+      } else if (in.wasPressed(Btn::Down) || in.wasPressed(downBtn)) {
+        step(+1);
         markDirty();
       }
       return;
@@ -940,17 +1007,53 @@ void ReaderScene::chapterCountAndSel(int* count, int* selOut) {
   int n = 0, sel = 0;
   if (_fbp) {
     n = (int)_fbp->tocCount();
-    // Current chapter = last TOC entry whose opening page <= current.
-    for (int i = 0; i < n; i++) {
-      uint32_t cid = 0;
-      char tmp[2];
-      if (!_fbp->tocEntry((uint32_t)i, tmp, sizeof(tmp), &cid)) break;
-      if (_fbp->pageForContentId(cid) <= _fbpPage) sel = i;
-      else break;
+    // Current chapter = last TOC entry that opens on or before this page.
+    //
+    // That used to be a walk: ask "which page does this row open on?" for
+    // every row until one passed the current page. Each answer is its own
+    // binary search over the page index, on the SD card, so the cost grew
+    // with how far into the book you were — and this runs on EVERY frame of
+    // the chapter menu, so it was paid again on every keypress. That is
+    // report #43's second half: "if I'm loaded in the later chapters it is
+    // very very sluggish, 10 to 15 seconds".
+    //
+    // Ask the inverse question once. A row belongs to this page or an
+    // earlier one exactly when its content id is below the id the NEXT page
+    // opens with, so one lookup gives the cutoff and a binary search over
+    // the rows finds the last one under it. Rows are in reading order in
+    // both package formats, which is what makes the search legal.
+    if (n > 0) {
+      uint32_t limit = UINT32_MAX, nextCid = 0;
+      if (_fbpPage + 1 < _fbp->pageCount() &&
+          _fbp->pageFirstCidPublic((uint16_t)(_fbpPage + 1), &nextCid))
+        limit = nextCid;
+      int lo = 0, hi = n - 1;
+      while (lo <= hi) {
+        const int mid = (lo + hi) / 2;
+        uint32_t cid = 0;
+        char tmp[2];
+        if (!_fbp->tocEntry((uint32_t)mid, tmp, sizeof(tmp), &cid)) break;
+        if (cid < limit) {
+          sel = mid;
+          lo = mid + 1;
+        } else {
+          hi = mid - 1;
+        }
+      }
     }
   } else if (_epub) {
-    n = _epub->getSpineItemsCount();
-    sel = _spine;
+    // Real chapters when the book declares a TOC; spine sections otherwise
+    // (see renderChapters — a spine counts cover/title/copyright as "chapters",
+    // which is what made the menu disagree with the book, #42).
+    const int tocCount = _epub->getTocItemsCount();
+    if (tocCount > 0) {
+      n = tocCount;
+      const int cur = _epub->getTocIndexForSpineIndex(_spine);
+      sel = cur >= 0 ? cur : 0;
+    } else {
+      n = _epub->getSpineItemsCount();
+      sel = _spine;
+    }
   }
   if (count) *count = n;
   if (selOut) *selOut = sel;
@@ -969,11 +1072,19 @@ void ReaderScene::chapterJump(int idx) {
   }
   if (!_epub) return;
   _menu = MenuView::None;
-  if (idx == _spine) {
+  // With a TOC the row index is a CHAPTER; translate it to the spine file
+  // that chapter opens in. Without one the row is already a spine index.
+  int target = idx;
+  if (_epub->getTocItemsCount() > 0) {
+    const int mapped = _epub->getSpineIndexForTocIndex(idx);
+    if (mapped < 0) return;  // TOC entry we could not resolve — do nothing
+    target = mapped;
+  }
+  if (target == _spine) {
     markDirty();
     return;
   }
-  _spine = idx;
+  _spine = target;
   _nextPage = 0;
   ensureSectionOrIndex();
 }
@@ -1056,7 +1167,7 @@ void ReaderScene::renderFbp(Gfx& gfx) {
 
 void ReaderScene::workBuildSection() {
   if (!_epub || !_section) {
-    failWith("Couldn't index this chapter");
+    failWith("Couldn't index this section");
     return;
   }
   // BLOCKING: zip inflate + expat SAX + DP line break + serialize, up to
@@ -1065,7 +1176,7 @@ void ReaderScene::workBuildSection() {
   const uint32_t t0 = millis();
   if (!_section->createSectionFile(_settings) || !_section->loadSectionFile(_settings)) {
     _section.reset();
-    failWith("Couldn't index this chapter");
+    failWith("Couldn't index this section");
     return;
   }
   Serial.printf("[xphone-os] reader: indexed spine %d: %u pages in %lu ms, heap=%u\n", _spine,
@@ -1575,6 +1686,7 @@ void ReaderScene::scanBooks(const int windowOffset) {
       // assets (cover thumb + shaped title strip) were pre-rendered by the
       // phone — extract them once into CoverThumb-format sidecars.
       bool focusEd = false;
+      xpTrace(b.path);
       if (reader::FbpBook::readMeta(b.path, b.title, sizeof(b.title), b.author, sizeof(b.author),
                                     &focusEd)) {
         b.focusEdition = focusEd;
@@ -1583,6 +1695,7 @@ void ReaderScene::scanBooks(const int windowOffset) {
         // the seeded name and leave the tile blank.
         if (b.title[0] == '\0') prettyFileTitle(b.path, b.title, sizeof(b.title));
         bool hasCover = false, hasStrip = false;
+        xpTrace("reader: extract cover art");
         reader::FbpBook::ensureShelfSidecars(b.path, &hasCover, &hasStrip);
         if (hasCover) {
           char cov[112];
@@ -1627,6 +1740,7 @@ void ReaderScene::scanBooks(const int windowOffset) {
 }
 
 void ReaderScene::scanDir(const char* dir, const int depth) {
+  xpTrace(depth == 0 ? "reader: scan /books" : "reader: scan subfolder");
   // Directory iteration needs SdFat's FsFile::openNext — below the ReaderFs
   // shim's surface, so use the SDK manager directly (same pattern as
   // SdUpdate.cpp; all SD access stays on the main loop task).
@@ -1748,6 +1862,11 @@ void ReaderScene::openSelectedBook() {
   markDirty();
 }
 
+bool ReaderScene::hasRealToc() const {
+  if (_fbp) return true;
+  return _epub && _epub->getTocItemsCount() > 0;
+}
+
 XpRect ReaderScene::listRect() const {
   if (_hCache <= 0) return XpRect{};  // no layout yet -> full-panel fallback
   return XpRect{0, kHeaderH + kStatsBandH, _wCache,
@@ -1861,8 +1980,8 @@ void ReaderScene::renderBody(Gfx& gfx) {
       return;
     case State::Indexing: {
       char info[40];
-      snprintf(info, sizeof(info), "ch %d of %d", _spine + 1, _epub ? _epub->getSpineItemsCount() : 0);
-      renderMessage(gfx, "Indexing chapter...", info);
+      snprintf(info, sizeof(info), "section %d of %d", _spine + 1, _epub ? _epub->getSpineItemsCount() : 0);
+      renderMessage(gfx, "Indexing section...", info);
       return;
     }
     case State::Error:
@@ -2038,11 +2157,11 @@ void ReaderScene::renderReading(Gfx& gfx) {
         _state = State::Indexing;
         _work = Work::BuildSection;
         char info[40];
-        snprintf(info, sizeof(info), "ch %d of %d", _spine + 1, _epub->getSpineItemsCount());
+        snprintf(info, sizeof(info), "section %d of %d", _spine + 1, _epub->getSpineItemsCount());
         renderMessage(gfx, "Indexing chapter...", info);
         return;
       }
-      failWith("Couldn't read this chapter");
+      failWith("Couldn't read this section");
       renderMessage(gfx, "Read", _errorMsg);
       return;
     }
@@ -2137,9 +2256,11 @@ void ReaderScene::renderMenuPage(Gfx& gfx) {
   renderMenuBody(gfx, y);
 }
 
-// The FOCUS chip, in the same shape the shelf badges the artwork with. Two
-// editions of one book are identical once open otherwise — you cannot tell
-// which one you are reading, which is exactly when you want to know.
+// The FOCUS chip. The shelf badges artwork with a bullseye, because a word
+// there costs a fifth of the cover; here the word stays, because the menu is
+// text anyway and has the room. Two editions of one book are identical once
+// open otherwise — you cannot tell which one you are reading, which is
+// exactly when you want to know.
 int ReaderScene::renderFocusChip(Gfx& gfx, int y) {
   if (!_fbp || !_fbp->isFocusEdition()) return y;
   const char* tag = "FOCUS";
@@ -2172,7 +2293,7 @@ void ReaderScene::renderMenuBody(Gfx& gfx, int y) {
   } else if (_section) {
     page = _section->currentPage + 1;
     total = (int)_section->pageCount;
-    snprintf(line, sizeof(line), "%d%%  -  ch %d of %d", (int)(frac * 100 + 0.5f),
+    snprintf(line, sizeof(line), "%d%%  -  section %d of %d", (int)(frac * 100 + 0.5f),
              _spine + 1, _epub ? _epub->getSpineItemsCount() : 0);
   } else {
     line[0] = 0;
@@ -2219,9 +2340,12 @@ void ReaderScene::renderMenuBody(Gfx& gfx, int y) {
         snprintf(value, sizeof(value), "%s", kStops[currentSizeStop(_fbp.get(), _settings.fontId)]);
         break;
       case kMenuRowChapters:
-        name = "Chapters";
-        if (chapCount > 0) snprintf(value, sizeof(value), "ch %d of %d", chapCur + 1, chapCount);
-        else snprintf(value, sizeof(value), "none");
+        // Raw epubs list spine sections, not chapters — see renderChapters.
+        name = hasRealToc() ? "Chapters" : "Sections";
+        if (chapCount > 0)
+          snprintf(value, sizeof(value), hasRealToc() ? "ch %d of %d" : "%d of %d", chapCur + 1, chapCount);
+        else
+          snprintf(value, sizeof(value), "none");
         break;
       case kMenuRowGoTo: name = "Go to page"; break;
       case kMenuRowBookmark:
@@ -2267,7 +2391,10 @@ void ReaderScene::renderMenuBody(Gfx& gfx, int y) {
   y = footerY;
   int pagesLeft = total - page;
   if (pagesLeft < 0) pagesLeft = 0;
-  const char* scope = _fbp ? "book" : "chapter";
+  // An fbp paginates the whole book; a raw epub only paginates the current
+  // SPINE section (cover, title page, chapter...), so "chapter" was a claim
+  // the engine could not back up — see renderChapters (#42).
+  const char* scope = _fbp ? "book" : "section";
   const int mins = estimateMinutesLeft(pagesLeft);
   if (mins > 0)
     // Long books read as "About 2072 min left" without this — nobody
@@ -2401,7 +2528,8 @@ void ReaderScene::renderBookmarks(Gfx& gfx) {
       if (chap[0]) snprintf(line, sizeof(line), "%s  -  p%u", chap, _marks[idx].page + 1);
       else snprintf(line, sizeof(line), "Page %u", _marks[idx].page + 1);
     } else {
-      snprintf(line, sizeof(line), "Chapter %u, page %u", _marks[idx].spine + 1,
+      snprintf(line, sizeof(line), _fbp ? "Chapter %u, page %u" : "Section %u, page %u",
+               _marks[idx].spine + 1,
                _marks[idx].page + 1);
     }
     char shown[64];
@@ -2618,7 +2746,7 @@ void ReaderScene::renderStatsBook(Gfx& gfx) {
   gfx.fillRect(left, y, static_cast<int>((right - left) * frac + 0.5f), 18, true);
   y += 18 + 10;
   snprintf(line, sizeof(line), _fbp ? "%d%% through  -  page %d of %d"
-                                    : "%d%% through  -  page %d of %d in this chapter",
+                                    : "%d%% through  -  page %d of %d in this section",
            static_cast<int>(frac * 100 + 0.5f), page, total);
   gfx.drawText(kFontSmall, left, y, line);
   y += gfx.lineHeight(kFontSmall) + 22;
@@ -2952,7 +3080,7 @@ void ReaderScene::renderChapters(Gfx& gfx) {
   int count = 0, cur = 0;
   chapterCountAndSel(&count, &cur);
 
-  gfx.drawText(kFontBold, 20, 10, "Chapters");
+  gfx.drawText(kFontBold, 20, 10, hasRealToc() ? "Chapters" : "Sections");
   char hdr[24];
   snprintf(hdr, sizeof(hdr), "%d / %d", _tocSel + 1, count > 0 ? count : 1);
   gfx.drawText(kFontRegular, w - 20 - gfx.textWidth(kFontRegular, hdr), 10, hdr);
@@ -2977,8 +3105,16 @@ void ReaderScene::renderChapters(Gfx& gfx) {
     if (_fbp) {
       if (!_fbp->tocEntry((uint32_t)idx, title, sizeof(title), nullptr)) continue;
       if (!title[0]) snprintf(title, sizeof(title), "Chapter %d", idx + 1);
+    } else if (_epub && _epub->getTocItemsCount() > 0) {
+      // The book's own chapter names, as every other reader shows them.
+      const auto entry = _epub->getTocItem(idx);
+      snprintf(title, sizeof(title), "%s", entry.title.c_str());
+      if (!title[0]) snprintf(title, sizeof(title), "Chapter %d", idx + 1);
     } else {
-      snprintf(title, sizeof(title), "Chapter %d", idx + 1);
+      // No TOC in the book: these rows are SPINE entries — cover, title page
+      // and copyright all count — so numbering them "Chapter N" would repeat
+      // the bug in #42. Name them for what they are.
+      snprintf(title, sizeof(title), "Section %d", idx + 1);
     }
     const bool sel = idx == _tocSel;
     if (sel) gfx.fillRect(0, y, w, rowH - 4, true);
@@ -3008,7 +3144,7 @@ void ReaderScene::renderStatusLine(Gfx& gfx) {
   char left[8];
   char right[24];
   snprintf(left, sizeof(left), "%d%%", pct);
-  snprintf(right, sizeof(right), "ch %d of %d", _spine + 1, _epub->getSpineItemsCount());
+  snprintf(right, sizeof(right), "section %d of %d", _spine + 1, _epub->getSpineItemsCount());
 
   const int lineH = gfx.lineHeight(kFontSmall);
   const int y = contentBottom(gfx, 0) - kStatusH + (kStatusH - lineH) / 2;
@@ -3246,14 +3382,19 @@ void ReaderScene::renderTile(Gfx& gfx, const int visibleIndex) {
   // Must come BEFORE the strip path below, which returns early — that is
   // precisely the branch a compiled focus edition takes.
   if (b.focusEdition) {
-    const char* tag = "FOCUS";
-    const int chipW = gfx.textWidth(kFontSmall, tag) + 14;
-    const int chipH = gfx.lineHeight(kFontSmall) + 6;
-    const int chipX = cx - kThumbW / 2 + 8;
-    const int chipY = thumbTop + kThumbH - chipH - 8;
-    gfx.fillRect(chipX, chipY, chipW, chipH, false);  // knock out the artwork
-    gfx.drawRoundedRect(chipX, chipY, chipW, chipH, chipH / 2, 2, true);
-    gfx.drawTextCentered(kFontSmall, chipX + chipW / 2, chipY + 3, tag);
+    // A word in a pill covered a fifth of the artwork (Andrew, 2026-08-29).
+    // A bullseye says the same thing in a fifth of the space, and needs no
+    // outline of its own: the white halo separates it from the cover under
+    // it, which a bare mark would disappear into on dark art.
+    const int d = 18;                            // the mark
+    const int pad = 3;                           // halo around it
+    const int bx = cx - kThumbW / 2 + 8;
+    const int by = thumbTop + kThumbH - d - 8;
+    gfx.fillRoundedRect(bx - pad, by - pad, d + 2 * pad, d + 2 * pad,
+                        (d + 2 * pad) / 2, false);
+    gfx.fillRoundedRect(bx, by, d, d, d / 2, true);
+    gfx.fillRoundedRect(bx + 4, by + 4, d - 8, d - 8, (d - 8) / 2, false);
+    gfx.fillRoundedRect(bx + 7, by + 7, d - 14, d - 14, (d - 14) / 2, true);
   }
 
   // FBP packages carry a phone-shaped title strip — Arabic/CJK titles render

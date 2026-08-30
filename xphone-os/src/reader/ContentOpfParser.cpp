@@ -18,6 +18,13 @@ constexpr char itemCacheFile[] = "/.items.bin";
 
 bool isImageMediaType(const std::string& mediaType) { return mediaType.rfind("image/", 0) == 0; }
 
+constexpr char MEDIA_TYPE_NCX[] = "application/x-dtbncx+xml";
+
+// Space-separated properties list contains the bare word "nav".
+bool hasNavProperty(const std::string& properties) {
+  return properties == "nav" || properties.find("nav ") == 0 || properties.find(" nav") != std::string::npos;
+}
+
 // Space-separated properties list contains the word "cover-image".
 bool hasCoverImageProperty(const std::string& properties) {
   return properties == "cover-image" || properties.find("cover-image ") == 0 ||
@@ -189,6 +196,15 @@ void XMLCALL ContentOpfParser::startElement(void* userData, const XML_Char* name
     // Write items down to SD card
     serialization::writeString(self->tempItemStore, itemId);
     serialization::writeString(self->tempItemStore, href);
+
+    // The table of contents, both eras. First one wins; a book that declares
+    // several is malformed and the extras are ignored.
+    if (self->tocNcxHref.empty() && mediaType == MEDIA_TYPE_NCX) {
+      self->tocNcxHref = href;
+    }
+    if (self->tocNavHref.empty() && !properties.empty() && hasNavProperty(properties)) {
+      self->tocNavHref = href;
+    }
 
     // EPUB 3: properties contains "cover-image" (strongest signal, first wins)
     if (self->coverPropsHref.empty() && !properties.empty() && hasCoverImageProperty(properties)) {

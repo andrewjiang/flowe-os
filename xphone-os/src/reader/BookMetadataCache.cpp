@@ -4,6 +4,7 @@
 #include "BookMetadataCache.h"
 
 #include <Serialization.h>
+#include <Utf8.h>   // utf8ComposeNfc for TOC titles
 #include <ZipFile.h>
 
 #include "ReaderFsUtils.h"
@@ -12,7 +13,12 @@
 namespace reader {
 
 namespace {
-constexpr uint8_t BOOK_CACHE_VERSION = 8;  // v8: TOC/book titles stored NFC-composed
+// v9: the TOC is actually populated. v8 caches were all written with
+// tocCount=0 (TOC parsing was pruned), so a book indexed before this build
+// would keep showing numbered sections forever. Bumping forces one silent
+// re-index per book on next open — the "Indexing..." screen users already
+// know — after which chapter names appear. Nothing else in the layout moved.
+constexpr uint8_t BOOK_CACHE_VERSION = 9;
 constexpr char bookBinFile[] = "/book.bin";
 constexpr char tmpSpineBinFile[] = "/spine.bin.tmp";
 constexpr char tmpTocBinFile[] = "/toc.bin.tmp";
@@ -42,15 +48,22 @@ bool BookMetadataCache::endContentOpfPass() {
 }
 
 bool BookMetadataCache::beginTocPass() {
-  LOG_DBG("BMC", "Beginning toc pass (spine-linear: no TOC entries will be written)");
+  LOG_DBG("BMC", "Beginning toc pass");
 
-  // Create the (empty) toc temp file so buildBookBin can open it; book.bin's
-  // v8 TOC slots stay zeroed.
+  // createTocEntry resolves each entry's href against the spine written in the
+  // previous pass, and endContentOpfPass() closed that file — so reopen it for
+  // READING here. (A book with no TOC simply never calls createTocEntry and
+  // the file is closed again below, unread.)
+  if (!Storage.openFileForRead("BMC", cachePath + tmpSpineBinFile, spineFile)) {
+    LOG_ERR("BMC", "Could not reopen spine file for the toc pass");
+    return false;
+  }
   return Storage.openFileForWrite("BMC", cachePath + tmpTocBinFile, tocFile);
 }
 
 bool BookMetadataCache::endTocPass() {
   // Explicit close() required: member variable persists beyond function scope
+  spineFile.close();  // reopened read-only by beginTocPass for href resolution
   tocFile.close();
   return true;
 }
@@ -212,6 +225,45 @@ void BookMetadataCache::createSpineEntry(const std::string& href) {
   const SpineEntry entry(href, 0, -1);
   writeSpineEntry(spineFile, entry);
   spineCount++;
+}
+
+// Restored with the TOC parsers (dropped in 622fc5f). Resolves the TOC
+// entry's href against the spine entries written so far, so the reader can
+// jump from a chapter name to the file that holds it. The original also had
+// an FNV hash index for books with 400+ spine items; that was pruned with
+// everything else and a linear scan is fine at this scale (a 300-chapter
+// book costs 300 short reads, once, at index time).
+void BookMetadataCache::createTocEntry(const std::string& title, const std::string& href, const std::string& anchor,
+                                       const uint8_t level) {
+  if (!buildMode || !tocFile || !spineFile) {
+    LOG_DBG("BMC", "createTocEntry called but not in build mode");
+    return;
+  }
+
+  int16_t spineIndex = -1;
+  const uint32_t restorePos = spineFile.position();
+  spineFile.seek(0);
+  for (int i = 0; i < spineCount; i++) {
+    if (readSpineEntry(spineFile).href == href) {
+      spineIndex = static_cast<int16_t>(i);
+      break;
+    }
+  }
+  spineFile.seek(restorePos);
+  if (spineIndex == -1) {
+    LOG_DBG("BMC", "createTocEntry: no spine item for TOC href %s", href.c_str());
+  }
+
+  // Compose to NFC at index time: device fonts have no combining-mark
+  // positioning, so an NFD title renders broken.
+  TocEntry entry;
+  entry.title = utf8ComposeNfc(title);
+  entry.href = href;
+  entry.anchor = anchor;
+  entry.level = level;
+  entry.spineIndex = spineIndex;
+  writeTocEntry(tocFile, entry);
+  tocCount++;
 }
 
 /* ============= READING / LOADING FUNCTIONS ================ */
