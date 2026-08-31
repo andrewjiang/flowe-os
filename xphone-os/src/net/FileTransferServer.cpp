@@ -1,5 +1,7 @@
 #include "FileTransferServer.h"
 
+#include "../StallWatch.h"
+
 #include <MD5Builder.h>
 
 #include <ArduinoJson.h>
@@ -274,6 +276,10 @@ void FileTransferServer::handleStatus() {
     doc["device"] = gDeviceIsX3 ? "X3" : "X4";
   }
   doc["version"] = XPHONE_VERSION;
+  // Longest the main loop has been stuck this run. A healthy device reports
+  // 0; anything here means the card, or something on it, is slow enough for
+  // the owner to notice — which is the question their report starts with.
+  doc["worstStallMs"] = stallwatch::worstStallMs();
   doc["gitRev"] = XPHONE_GIT_REV_STR;  // exact build for bug reports
   // In AP (Direct) mode localIP() is the STA side — 0.0.0.0. The phone
   // locks the whole session onto this address, so reporting 0.0.0.0 sent

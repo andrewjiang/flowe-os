@@ -41,6 +41,7 @@
 #include "TodayStore.h"
 #include "WorkoutStore.h"
 #include "SdUpdate.h"
+#include "StallWatch.h"
 #include "Sleep.h"
 #include "ble/CompanionAncsClient.h"
 #include "ble/CompanionBleService.h"
@@ -133,8 +134,14 @@ static void bootTrace(const char* stage) {
   f.close();
 }
 
-// The same breadcrumb, reachable from the scenes (see BootTrace.h).
-void xpTrace(const char* stage) { bootTrace(stage); }
+// The same breadcrumb, reachable from the scenes (see BootTrace.h). It also
+// feeds the stall watcher, which is what makes a freeze self-reporting: the
+// SD write still needs arming, but naming the step costs a short copy and so
+// is always on.
+void xpTrace(const char* stage) {
+  stallwatch::stage(stage);
+  bootTrace(stage);
+}
 
 // M4.2 wake diagnostic: esp_reset_reason() -> short label. Captured at the very
 // top of boot() so the About scene can show whether the X3 power-button wake is
@@ -183,6 +190,7 @@ static void boot() {
   // The web flasher reads this line straight off the USB serial.
   Serial.printf("[xphone-os] flowe %s (%s)\n", XPHONE_VERSION, XPHONE_GIT_REV_STR);
   Serial.printf("[xphone-os] boot: xteink detect -> %s\n", gDeviceIsX3 ? "X3" : "X4");
+  stallwatch::begin();
   if (gDeviceIsX3) {
     display.setDisplayX3();
   }
@@ -206,6 +214,25 @@ static void boot() {
       probe.close();
       gBootTrace = true;
       bootTrace(gDeviceIsX3 ? "boot: spi up, detect=X3" : "boot: spi up, detect=X4");
+    }
+    // Did the last run freeze? The watcher wrote WHERE into RTC memory,
+    // which the reset button does not clear. Put it on the card now, while
+    // nothing is stuck, so the file simply EXISTS for an owner who never
+    // prepared anything. Also arm the detailed trace for the next run: the
+    // device has now seen a freeze once, so the extra writes are earned.
+    char stall[96];
+    if (stallwatch::takeReport(stall, sizeof(stall))) {
+      Serial.printf("[xphone-os] PREVIOUS RUN %s\n", stall);
+      FsFile f = SdMan.open("/flowe-diag.txt", O_WRONLY | O_CREAT | O_APPEND);
+      if (f) {
+        char line[192];
+        const int n = snprintf(line, sizeof(line), "flowe %s (%s) on %s: %s\n", XPHONE_VERSION,
+                               XPHONE_GIT_REV_STR, gDeviceIsX3 ? "X3" : "X4", stall);
+        if (n > 0) f.write(reinterpret_cast<const uint8_t*>(line), static_cast<size_t>(n));
+        f.flush();
+        f.close();
+      }
+      gBootTrace = true;
     }
   }
 
@@ -970,6 +997,79 @@ static void pumpDevConsole() {
       showFileTransferAutoStart();
       continue;
     }
+    if (!strcmp(line, "sdtest")) {
+      // The card speed test behind the web console's "Test the card"
+      // button. Twenty minutes for six books, and a Read screen that stops
+      // answering buttons, both smell like a slow or failing card
+      // (oky_doodle, 2026-08-29) — this turns the smell into a number the
+      // owner can read us over chat. Reads the largest book for up to 3 s;
+      // writes nothing.
+      Serial.println("[xphone-os] devcon: sdtest — timing card reads");
+      if (!SdMan.ready() && !SdMan.begin()) {
+        Serial.println("[xphone-os] devcon: sdtest: no card");
+        continue;
+      }
+      char pick[160] = {0};
+      uint64_t pickSize = 0;
+      FsFile dir = SdMan.open("/books", O_RDONLY);
+      if (dir && dir.isDir()) {
+        FsFile f;
+        char nm[128];
+        while (f.openNext(&dir, O_RDONLY)) {
+          if (!f.isDir() && f.fileSize() > pickSize && f.getName(nm, sizeof(nm)) > 0 &&
+              nm[0] != '.') {
+            pickSize = f.fileSize();
+            snprintf(pick, sizeof(pick), "/books/%s", nm);
+          }
+          f.close();
+        }
+      }
+      if (dir) dir.close();
+      if (!pick[0]) {
+        Serial.println("[xphone-os] devcon: sdtest: /books has no files to read");
+        continue;
+      }
+      FsFile f = SdMan.open(pick, O_RDONLY);
+      if (!f) {
+        Serial.printf("[xphone-os] devcon: sdtest: cannot open %s\n", pick);
+        continue;
+      }
+      static uint8_t buf[2048];  // BSS, not this task's tight stack
+      const uint32_t t0 = millis();
+      uint32_t total = 0;
+      // Deliberate work, not a hang: keep the stall watcher fed, or a slow
+      // card would file this very test as a freeze.
+      while (millis() - t0 < 3000) {
+        const int got = f.read(buf, sizeof(buf));
+        if (got <= 0) break;
+        total += static_cast<uint32_t>(got);
+        stallwatch::beat();
+      }
+      const uint32_t ms = millis() - t0;
+      f.close();
+      Serial.printf("[xphone-os] devcon: sdtest %s: read %lu KB in %lu ms = %lu KB/s "
+                    "(heap %lu, worst stall this run %lu ms)\n",
+                    pick, static_cast<unsigned long>(total / 1024),
+                    static_cast<unsigned long>(ms),
+                    static_cast<unsigned long>(ms ? (total / 1024) * 1000UL / ms : 0),
+                    static_cast<unsigned long>(ESP.getFreeHeap()),
+                    static_cast<unsigned long>(stallwatch::worstStallMs()));
+      continue;
+    }
+    if (!strncmp(line, "stall ", 6)) {
+      // Bench-only: block the loop on purpose, so the stall watcher can be
+      // proven to catch a freeze rather than assumed to. Nothing else can
+      // produce one on demand — a real freeze needs a failing SD card.
+      const unsigned long ms = strtoul(line + 6, nullptr, 10);
+      Serial.printf("[xphone-os] devcon: stalling the loop for %lums\n", ms);
+      xpTrace("devcon: deliberate stall");
+      const uint32_t until = millis() + static_cast<uint32_t>(ms);
+      while (static_cast<int32_t>(millis() - until) < 0) {
+      }
+      Serial.printf("[xphone-os] devcon: stall over, worst this run %lums\n",
+                    static_cast<unsigned long>(stallwatch::worstStallMs()));
+      continue;
+    }
     if (!strcmp(line, "reboot")) {
       Serial.println("[xphone-os] devcon: reboot");
       SCENES.waitFlushIdle();  // same teardown as the power-hold restart
@@ -1011,6 +1111,7 @@ static void pumpDevConsole() {
 }
 
 void loop() {
+  stallwatch::beat();       // "the loop is alive"; a stuck loop stops ticking
   pumpDevConsole();         // bench-only: serial "btn X" -> synthetic taps
   input.update();           // debounced button edges (SDK InputManager)
   checkPowerButton();       // press+release -> deep sleep; hold ~2.5s -> restart
