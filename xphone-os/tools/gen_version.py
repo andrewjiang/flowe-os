@@ -20,7 +20,7 @@ Import("env")  # noqa: F821  (PlatformIO injects this)
 import subprocess
 import os
 
-MARKETING = "0.6.5"
+MARKETING = "0.6.6"
 
 
 def git_rev():

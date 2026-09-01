@@ -676,6 +676,19 @@ void FileTransferServer::handleUploadData() {
     if (!_upload.failed) {
       Serial.printf("[xphone-os] transfer: upload done %s (%u bytes)\n", _upload.path,
                     static_cast<unsigned>(_upload.received));
+      // A replaced package must not keep the OLD book's shelf art: the
+      // sidecar extractor early-returns when either file exists, so a
+      // recompiled book would wear its predecessor's cover and title strip
+      // forever. Dropping them here makes the next shelf visit re-extract
+      // from the new package.
+      const size_t plen = strlen(_upload.path);
+      if (plen >= 4 && strcasecmp(_upload.path + plen - 4, ".fbp") == 0) {
+        char side[sizeof(_upload.path) + 4];
+        snprintf(side, sizeof(side), "%s.cov", _upload.path);
+        if (SdMan.exists(side)) SdMan.remove(side);
+        snprintf(side, sizeof(side), "%s.str", _upload.path);
+        if (SdMan.exists(side)) SdMan.remove(side);
+      }
     }
 
   } else if (up.status == UPLOAD_FILE_ABORTED) {

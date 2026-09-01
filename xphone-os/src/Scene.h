@@ -46,6 +46,11 @@ class Scene {
   // content above gfx.height() - SOFTKEY_BAR_H.
   static constexpr int SOFTKEY_BAR_H = 44;
 
+  // Horizontal center (portrait) of soft-key slot 0..3 under the rocker
+  // pairing. For a scene that draws its own minimal key hints (the reader's
+  // reading chrome) exactly where the tabs would sit.
+  static int softKeySlotCenterX(Gfx& gfx, int slot);
+
   virtual void onEnter() {}
   virtual void onExit() {}
 

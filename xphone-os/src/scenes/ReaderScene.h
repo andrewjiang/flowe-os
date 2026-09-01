@@ -142,6 +142,7 @@ class ReaderScene : public Scene {
   void renderBookmarks(Gfx& gfx);
   void renderStatsBook(Gfx& gfx);
   void renderStatsLife(Gfx& gfx);
+  void renderStatsResetConfirm(Gfx& gfx);
   // Bookmarks: current place -> a mark; jumping restores it.
   bool applyOrientation(Gfx& gfx, bool toLandscape, bool persist);
   // The direction pair (soft-key slots 2 and 3). See Scene.h for the rule and
@@ -155,7 +156,7 @@ class ReaderScene : public Scene {
   void jumpToBookmark(int idx);
   void renderBody(Gfx& gfx);
   void renderReading(Gfx& gfx);
-  void renderStatusLine(Gfx& gfx);
+  void renderReadingChrome(Gfx& gfx);
   void renderBookList(Gfx& gfx);
   void renderTile(Gfx& gfx, int visibleIndex);
   void renderMessage(Gfx& gfx, const char* line1, const char* line2);
@@ -237,6 +238,12 @@ class ReaderScene : public Scene {
   // header-pill idiom) and opens READING LIFE — your reading belongs to
   // the shelf, not to whichever book happens to be open.
   bool _lifeOpen = false;
+  // flowe-os#44: RESET on the READING LIFE page arms a full-page confirm;
+  // ERASE there wipes the store. Disarmed on every path that leaves the page.
+  bool _statsResetArm = false;
+  // flowe-os#41: draw the soft-key bar while reading a page. Mirrored from
+  // NVS "rdKeys"; the shelf and every menu view always keep their labels.
+  bool _readKeyBar = true;
   // Landscape reading (FBP only — the package must carry the profiles).
   bool _landscape = false;
   // The reader's GLOBAL orientation preference, mirrored from NVS "rdLand".

@@ -219,6 +219,22 @@ void ReadingStats::sessionEnd() {
   s_pages = 0;
 }
 
+bool ReadingStats::resetAll() {
+  load();
+  memset(&s_store, 0, sizeof(s_store));
+  s_store.magic = kMagic;
+  s_store.version = kVersion;
+  if (s_active) {
+    // The open session restarts at zero rather than flushing its pre-reset
+    // pages and minutes back into the emptied store at the next sessionEnd.
+    s_startMs = millis();
+    s_pages = 0;
+  }
+  const bool ok = save();
+  LOG_DBG("STA", "stats reset -> %s", ok ? "saved" : "SAVE FAILED");
+  return ok;
+}
+
 bool ReadingStats::bookStats(const std::string& bookPath, uint32_t* pages, uint32_t* minutes,
                              uint32_t* lastDay, uint32_t* firstDay, uint16_t* daysRead) {
   load();

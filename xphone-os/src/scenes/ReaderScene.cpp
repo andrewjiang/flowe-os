@@ -82,12 +82,22 @@ constexpr const char* kPrefsFontKey = "rdFont";  // reader fontId (0/1/2)
 // A book whose package carries no landscape profiles opens portrait WITHOUT
 // clearing this: the preference records intent, the package decides capability.
 constexpr const char* kPrefsLandKey = "rdLand";  // 1 = landscape
+// Soft-key labels while reading a page (flowe-os#41): some readers want the
+// page and nothing else. Menus keep their labels — a menu you cannot read is
+// broken, but a page turn is a habit the hands already know.
+constexpr const char* kPrefsKeysKey = "rdKeys";  // 1 = show the bar (default)
 
 // Layout (logical portrait). The text viewport is part of the section.bin
 // cache key (settings-in-header), so these only change with a cache rebuild.
 constexpr int kMarginX = 24;
 constexpr int kMarginTop = 24;
-constexpr int kStatusH = 24;  // status line strip above the soft-key bar
+constexpr int kStatusH = 24;  // footer strip above the soft-key bar (landscape fbp)
+// Reading chrome v3: the page owns the panel down to this reserve. The bare
+// labels' ink spans roughly the bottom 17 px (band mid at h-12), so 30 keeps
+// a clear 13 px between the last text line and the chrome. The reading page
+// deliberately ignores SOFTKEY_BAR_H — it draws its own chrome there.
+// Matches bookc's portrait margin_bot (compile.c kGeometries) on purpose.
+constexpr int kReadingBottomH = 30;
 
 // Right edge available to page content: in landscape the soft-key column
 // occupies that side, so every full-page screen has to stop before it.
@@ -331,6 +341,7 @@ void ReaderScene::onEnter() {
       const uint8_t fid = prefs.getUChar(kPrefsFontKey, static_cast<uint8_t>(_settings.fontId));
       if (fid < reader::kReaderFontCount) _settings.fontId = fid;
       _wantLandscape = prefs.getUChar(kPrefsLandKey, 0) != 0;
+      _readKeyBar = prefs.getUChar(kPrefsKeysKey, 1) != 0;
       prefs.end();
     }
   }
@@ -426,7 +437,8 @@ const char* const* ReaderScene::softKeys() const {
   // (see the direction-key rule in Scene.h). Where that means the two keys
   // trade jobs, dirSwap() below makes the input agree — the two are read from
   // the same predicate so they cannot drift apart.
-  static constexpr const char* kReading[4] = {"BOOKS", "MENU", SoftKey::Left, SoftKey::Right};
+  // (Portrait reading has no tab table anymore — reading chrome v3 draws
+  // its own bare labels; see renderReadingChrome.)
   // Turning a page is a LEFT/RIGHT idea, not an up/down one (Andrew,
   // 2026-08-17), so the arrows stay horizontal when the panel turns —
   // only which key carries which action flips, so that "next" is the
@@ -455,11 +467,15 @@ const char* const* ReaderScene::softKeys() const {
   // does nothing is a lie about the button under it.
   static constexpr const char* kMarksEmpty[4] = {"BACK", nullptr, nullptr, nullptr};
   static constexpr const char* kStatsBook[4] = {"BACK", "READ", nullptr, nullptr};
-  static constexpr const char* kStatsLife[4] = {"BACK", "READ", nullptr, nullptr};
+  // READING LIFE offers RESET on the spare key (flowe-os#44). Pressing it
+  // swaps the whole page for a confirm whose keys say only BACK and ERASE —
+  // two different presses stand between a stray key and an empty store.
+  static constexpr const char* kStatsLife[4] = {"BACK", "READ", nullptr, "RESET"};
+  static constexpr const char* kStatsErase[4] = {"BACK", "ERASE", nullptr, nullptr};
   static constexpr const char* kList[4] = {"BACK", "OPEN", SoftKey::Left, SoftKey::Right};
   static constexpr const char* kListStats[4] = {"BACK", "OPEN", SoftKey::Left, SoftKey::Right};
   static constexpr const char* kListEmpty[4] = {"BACK", nullptr, nullptr, nullptr};
-  static constexpr const char* kLife[4] = {"BACK", nullptr, nullptr, nullptr};
+  static constexpr const char* kLife[4] = {"BACK", nullptr, nullptr, "RESET"};
   const bool land = _landscape;
   static constexpr const char* kNotice[4] = {"BACK", "READ", nullptr, nullptr};
   switch (_state) {
@@ -473,12 +489,17 @@ const char* const* ReaderScene::softKeys() const {
         case MenuView::Bookmarks:
           return _markCount == 0 ? kMarksEmpty : (land ? kMarksL : kMarks);
         case MenuView::StatsBook: return kStatsBook;
-        case MenuView::StatsLife: return kStatsLife;
+        case MenuView::StatsLife: return _statsResetArm ? kStatsErase : kStatsLife;
         case MenuView::None:      break;
       }
-      return land ? kReadingL : kReading;
+      // Reading chrome v3: portrait reading draws its own bare labels (see
+      // renderReadingChrome) — no tabs from the SceneManager. Landscape
+      // keeps the tab column, and the Hidden setting (flowe-os#41) blanks
+      // it there too; the buttons keep working either way.
+      if (!land) return kHidden;
+      return _readKeyBar ? kReadingL : kHidden;
     case State::BookList:
-      if (_lifeOpen) return kLife;
+      if (_lifeOpen) return _statsResetArm ? kStatsErase : kLife;
       if (_sel < 0) return kListStats;
       return _totalBooks > 0 ? kList : kListEmpty;
     case State::Error:
@@ -651,6 +672,7 @@ enum MenuRow : uint8_t {
   kMenuRowBookmark,
   kMenuRowBookmarks,
   kMenuRowOrientation,
+  kMenuRowKeyLabels,
   kMenuRowStats,
   kMenuRowCount,
 };
@@ -672,6 +694,7 @@ static int menuRows(bool isFbp, bool landscapeReady, MenuRow* out) {
   out[n++] = kMenuRowBookmark;
   out[n++] = kMenuRowBookmarks;
   if (isFbp) out[n++] = kMenuRowOrientation;
+  out[n++] = kMenuRowKeyLabels;
   out[n++] = kMenuRowStats;
   return n;
 }
@@ -870,6 +893,24 @@ void ReaderScene::handleMenuInput(Input& in) {
 
     case MenuView::StatsBook:
     case MenuView::StatsLife:
+      // READING LIFE only: RESET (the slot-3 key) arms the erase confirm;
+      // once armed, ERASE is Confirm and BACK stands down (flowe-os#44).
+      if (_menu == MenuView::StatsLife && _statsResetArm) {
+        if (in.wasPressed(Btn::Confirm)) {
+          reader::ReadingStats::resetAll();
+          _statsResetArm = false;
+          markDirty();  // the page now honestly says "Nothing to show yet"
+        } else if (in.wasPressed(Btn::Back)) {
+          _statsResetArm = false;
+          markDirty();
+        }
+        return;
+      }
+      if (_menu == MenuView::StatsLife && in.wasPressed(Btn::Right)) {
+        _statsResetArm = true;
+        markDirty();
+        return;
+      }
       if (in.wasPressed(Btn::Confirm)) {
         _menu = MenuView::None;  // READ
         markDirty();
@@ -933,6 +974,16 @@ void ReaderScene::menuSelect() {
       _pendingOrientPersist = true;
       markDirty();
       return;
+    case kMenuRowKeyLabels: {
+      _readKeyBar = !_readKeyBar;
+      Preferences prefs;
+      if (prefs.begin(kPrefsNamespace, /*readOnly=*/false)) {
+        prefs.putUChar(kPrefsKeysKey, _readKeyBar ? 1 : 0);
+        prefs.end();
+      }
+      markDirty();  // the row's value column reports the result
+      return;
+    }
     case kMenuRowStats:
       _menu = MenuView::StatsBook;
       markDirty();
@@ -1155,13 +1206,17 @@ void ReaderScene::renderFbp(Gfx& gfx) {
                   ESP.getFreeHeap(), (unsigned long)_fbp->lastPeakBytes(),
                   (unsigned long)_fbp->lastUniqGlyphs());
   }
-  // Status strip ABOVE the soft-key bar, same slot as renderStatusLine.
-  // The menu strips replace it while open (their sheets own that band).
+  // Reading chrome (portrait) or the centered footer (landscape, where the
+  // tab column keeps the standard bar). Menu strips own the band while open.
   if (_menu == MenuView::None) {
-    char footer[32];
-    snprintf(footer, sizeof(footer), "%u / %u", _fbpPage + 1, _fbp->pageCount());
-    const int stripY = contentBottom(gfx, 0) - kStatusH + 4;
-    gfx.drawTextCentered(kFontSmall, contentRight(gfx, 0) / 2, stripY, footer);
+    if (_landscape) {
+      char footer[32];
+      snprintf(footer, sizeof(footer), "%u / %u", _fbpPage + 1, _fbp->pageCount());
+      const int stripY = contentBottom(gfx, 0) - kStatusH + 4;
+      gfx.drawTextCentered(kFontSmall, contentRight(gfx, 0) / 2, stripY, footer);
+    } else {
+      renderReadingChrome(gfx);
+    }
   }
 }
 
@@ -1445,6 +1500,23 @@ void ReaderScene::handleInput(Input& in) {
 
     case State::BookList:
       if (_lifeOpen) {
+        // Same RESET/ERASE two-step as the in-book READING LIFE page.
+        if (_statsResetArm) {
+          if (in.wasPressed(Btn::Confirm)) {
+            reader::ReadingStats::resetAll();
+            _statsResetArm = false;
+            markDirty();
+          } else if (in.wasPressed(Btn::Back)) {
+            _statsResetArm = false;
+            markDirty();
+          }
+          return;
+        }
+        if (in.wasPressed(Btn::Right)) {
+          _statsResetArm = true;
+          markDirty();
+          return;
+        }
         if (in.wasPressed(Btn::Back) || in.wasPressed(Btn::Confirm)) {
           _lifeOpen = false;
           markDirty();
@@ -1594,6 +1666,7 @@ void ReaderScene::enterBookList() {
   _menuSel = 0;
   _orientNote = false;
   _lifeOpen = false;
+  _statsResetArm = false;  // an armed erase never survives leaving the page
   _pendingRestorePortrait = _landscape;  // shelf + every other scene is portrait
   _landscape = false;
   _pendingOrient = -1;  // a pending flip must not follow us out of the book
@@ -1698,12 +1771,14 @@ void ReaderScene::scanBooks(const int windowOffset) {
         xpTrace("reader: extract cover art");
         reader::FbpBook::ensureShelfSidecars(b.path, &hasCover, &hasStrip);
         if (hasCover) {
-          char cov[112];
+          // Only the DIMS are cached; renderTile derives the sidecar path
+          // from b.path at draw time. Storing it needed path + ".cov" to
+          // fit thumbPath[64], and a long filename silently failed that
+          // test — Project Hail Mary (z-library's 66-char name) shipped a
+          // perfectly good cover the shelf never showed.
+          char cov[sizeof(b.path) + 8];
           snprintf(cov, sizeof(cov), "%s.cov", b.path);
-          if (strlen(cov) < sizeof(b.thumbPath) && readThumbDims(cov, &b.thumbW, &b.thumbH)) {
-            memcpy(b.thumbPath, cov, strlen(cov) + 1);
-            b.meta = TileMeta::Cover;
-          }
+          if (readThumbDims(cov, &b.thumbW, &b.thumbH)) b.meta = TileMeta::Cover;
         }
       }
       continue;
@@ -1963,8 +2038,12 @@ void ReaderScene::render(Gfx& gfx) {
   _hCache = static_cast<int16_t>(gfx.height());
   // Text viewport from the actual panel (resolution-agnostic; part of the
   // section.bin cache key). Constant per device, so caches stay valid.
+  // Reading chrome v3 reclaimed the status strip and the tab bar: the page
+  // runs down to kReadingBottomH — roughly one more line per page. The
+  // changed height re-keys every section cache, so existing books re-index
+  // once behind the normal "Indexing..." screen.
   _settings.viewportWidth = static_cast<uint16_t>(_wCache - 2 * kMarginX);
-  _settings.viewportHeight = static_cast<uint16_t>(_hCache - kMarginTop - kStatusH - Scene::SOFTKEY_BAR_H);
+  _settings.viewportHeight = static_cast<uint16_t>(_hCache - kMarginTop - kReadingBottomH);
 
   renderBody(gfx);
 
@@ -2116,7 +2195,8 @@ void ReaderScene::renderReading(Gfx& gfx) {
     return;
   }
   if (_menu == MenuView::StatsLife) {
-    renderStatsLife(gfx);
+    if (_statsResetArm) renderStatsResetConfirm(gfx);
+    else renderStatsLife(gfx);
     return;
   }
   if (_fbp) {
@@ -2132,7 +2212,7 @@ void ReaderScene::renderReading(Gfx& gfx) {
 
   if (_section->pageCount == 0) {
     renderMessage(gfx, nullptr, "(empty chapter)");
-    renderStatusLine(gfx);
+    renderReadingChrome(gfx);
     saveProgress();
     return;
   }
@@ -2173,7 +2253,7 @@ void ReaderScene::renderReading(Gfx& gfx) {
                   _section->pageCount, static_cast<unsigned long>(millis() - t0));
   }
 
-  if (_menu == MenuView::None) renderStatusLine(gfx);  // strips own that band
+  if (_menu == MenuView::None) renderReadingChrome(gfx);  // strips own that band
   saveProgress();     // crash-safe resume: 6 bytes, atomic, every page
   maybeArmPrefetch();  // silent next-chapter indexing near the chapter end
   if (_menu == MenuView::SizeStrip) renderSizeStrip(gfx);
@@ -2234,7 +2314,7 @@ void ReaderScene::renderMenuPage(Gfx& gfx) {
   // there, fall back to the FBP package's phone-SHAPED title strip,
   // which carries any script as a bitmap.
   if (!gfx.canRender(kFontBold, title) && _fbp) {
-    char strip[112];
+    char strip[168];
     snprintf(strip, sizeof(strip), "%s.str", _bookPath.c_str());
     uint16_t sw = 0, sh = 0;
     if (readThumbDims(strip, &sw, &sh) && sw > 0 && sh > 0 && sw <= w &&
@@ -2367,6 +2447,11 @@ void ReaderScene::renderMenuBody(Gfx& gfx, int y) {
         } else {
           snprintf(value, sizeof(value), "%s", _landscape ? "Landscape" : "Portrait");
         }
+        break;
+      case kMenuRowKeyLabels:
+        // "Shown"/"Hidden" describes the bar's state, the row toggles it.
+        name = "Button labels";
+        snprintf(value, sizeof(value), "%s", _readKeyBar ? "Shown" : "Hidden");
         break;
       case kMenuRowStats: name = "Book stats"; break;
       default: break;
@@ -2642,7 +2727,7 @@ void ReaderScene::renderStatsBook(Gfx& gfx) {
   int coverW = 0, coverH = 0;
   bool drewCover = false;
   {
-    char cov[112];
+    char cov[168];
     uint16_t cw = 0, ch = 0;
     cov[0] = 0;
     if (_fbp) snprintf(cov, sizeof(cov), "%s.cov", _bookPath.c_str());
@@ -2698,7 +2783,7 @@ void ReaderScene::renderStatsBook(Gfx& gfx) {
       by += gfx.lineHeight(kFontSmall);
     }
   } else {
-    char strip[112];
+    char strip[168];
     snprintf(strip, sizeof(strip), "%s.str", _bookPath.c_str());
     uint16_t sw = 0, sh = 0;
     if (_fbp && readThumbDims(strip, &sw, &sh) && sw > 0 && sw <= right - bx &&
@@ -2841,6 +2926,24 @@ void ReaderScene::renderStatsLife(Gfx& gfx) {
   }
   gfx.fillRect(left, 40, right - left, 2, true);
 
+  // Nothing recorded at all (first run, or right after RESET): an
+  // invitation, not a wall of zeros. Checked BEFORE the hero — with a
+  // synced clock the fall-through hero is a giant "0 books this year"
+  // over an empty month strip, exactly the scold the hero logic exists
+  // to avoid. Seen on glass right after the #44 erase.
+  if (sum.lifetimePages == 0 && sum.lifetimeMinutes == 0) {
+    const int midY = (contentBottom(gfx, 0)) / 2 - 40;
+    gfx.drawTextCentered(kFontBold, w / 2, midY, "Nothing to show yet");
+    gfx.drawTextCentered(kFontSmall, w / 2, midY + gfx.lineHeight(kFontBold) + 10,
+                         "Read a few pages and your streak,");
+    gfx.drawTextCentered(kFontSmall, w / 2,
+                         midY + gfx.lineHeight(kFontBold) + 10 + gfx.lineHeight(kFontSmall) + 4,
+                         "your week and your totals appear here.");
+    gfx.drawTextCentered(kFontSmall, w / 2, contentBottom(gfx, 0) - 24,
+                         _lifeOpen ? "BACK returns to your books" : "BACK returns to the menu");
+    return;
+  }
+
   int y = 62;
   bool heroIsBooks = false;
   if (b.clockValid) {
@@ -2960,22 +3063,6 @@ void ReaderScene::renderStatsLife(Gfx& gfx) {
       gfx.drawTextCentered(kFontSmall, x + barWidth / 2, y + chartH + 8, kDayLetters[weekday]);
     }
     y += chartH + 8 + gfx.lineHeight(kFontSmall) + 24;
-  }
-
-  // Nothing recorded at all (first run, or right after a format change):
-  // an invitation, not a wall of zeros. An empty state earns its words —
-  // this is the one place on the page where a sentence is the content.
-  if (sum.lifetimePages == 0 && sum.lifetimeMinutes == 0) {
-    const int midY = (contentBottom(gfx, 0)) / 2 - 40;
-    gfx.drawTextCentered(kFontBold, w / 2, midY, "Nothing to show yet");
-    gfx.drawTextCentered(kFontSmall, w / 2, midY + gfx.lineHeight(kFontBold) + 10,
-                         "Read a few pages and your streak,");
-    gfx.drawTextCentered(kFontSmall, w / 2,
-                         midY + gfx.lineHeight(kFontBold) + 10 + gfx.lineHeight(kFontSmall) + 4,
-                         "your week and your totals appear here.");
-    gfx.drawTextCentered(kFontSmall, w / 2, contentBottom(gfx, 0) - 24,
-                         _lifeOpen ? "BACK returns to your books" : "BACK returns to the menu");
-    return;
   }
 
   // Without a date the calendar, the streak and the week chart all have
@@ -3132,36 +3219,77 @@ void ReaderScene::renderChapters(Gfx& gfx) {
 
 }
 
-void ReaderScene::renderStatusLine(Gfx& gfx) {
-  // "34%  ·  ch 3/12" — the ONLY reading chrome. The UI fonts are ASCII-only
-  // subsets, so the middle dot is stamped as a 3x3 square instead of U+00B7.
-  const int count = _section ? static_cast<int>(_section->pageCount) : 0;
-  const float chapterProgress = count > 0 ? static_cast<float>(_section->currentPage + 1) / count : 0.0f;
-  int pct = static_cast<int>(_epub->calculateProgress(_spine, chapterProgress) * 100.0f + 0.5f);
-  if (pct < 0) pct = 0;
-  if (pct > 100) pct = 100;
+// flowe-os#44: the full page between RESET and an empty store. A destructive
+// act deserves its own page saying exactly what it erases and what it spares;
+// the soft keys under it read only BACK and ERASE.
+void ReaderScene::renderStatsResetConfirm(Gfx& gfx) {
+  const int w = contentRight(gfx, 0);
+  gfx.fillRect(0, 0, gfx.width(), gfx.height(), false);
+  const int lh = gfx.lineHeight(kFontSmall);
+  int y = contentBottom(gfx, 0) / 2 - gfx.lineHeight(kFontBold) - 2 * lh - 20;
+  if (y < 40) y = 40;
+  gfx.drawTextCentered(kFontBold, w / 2, y, "Erase all reading stats?");
+  y += gfx.lineHeight(kFontBold) + 14;
+  gfx.drawTextCentered(kFontSmall, w / 2, y, "Your streak, day history and book");
+  y += lh + 4;
+  gfx.drawTextCentered(kFontSmall, w / 2, y, "totals go back to zero. Books and");
+  y += lh + 4;
+  gfx.drawTextCentered(kFontSmall, w / 2, y, "bookmarks are not touched.");
+  y += lh + 22;
+  gfx.drawTextCentered(kFontSmall, w / 2, y, "ERASE wipes them. BACK keeps them.");
+}
 
-  char left[8];
-  char right[24];
-  snprintf(left, sizeof(left), "%d%%", pct);
-  snprintf(right, sizeof(right), "section %d of %d", _spine + 1, _epub->getSpineItemsCount());
+// A 12 px arrow with a 2 px shaft — the reading chrome's whisper-sized
+// cousin of Scene.cpp's drawArrow.
+static void drawMiniArrow(Gfx& gfx, int cx, int cy, bool right) {
+  constexpr int len = 12;
+  constexpr int half = len / 2;
+  constexpr int head = (len * 5) / 12;
+  gfx.fillRect(cx - half, cy - 1, len, 2, true);
+  for (int i = 0; i < head; i++) {
+    const int x = right ? cx + half - 1 - i : cx - half + i;
+    gfx.fillRect(x, cy - i, 1, 2 * i + 1, true);
+  }
+}
 
-  const int lineH = gfx.lineHeight(kFontSmall);
-  const int y = contentBottom(gfx, 0) - kStatusH + (kStatusH - lineH) / 2;
-  constexpr int kDot = 3;
-  constexpr int kGap = 12;
-  const int wl = gfx.textWidth(kFontSmall, left);
-  const int wr = gfx.textWidth(kFontSmall, right);
-  const int total = wl + kGap + kDot + kGap + wr;
-  const int x = (contentRight(gfx, 0) - total) / 2;
-  gfx.drawText(kFontSmall, x, y, left);
-  gfx.fillRect(x + wl + kGap, y + lineH / 2 - kDot / 2, kDot, kDot, true);
-  gfx.drawText(kFontSmall, x + wl + kGap + kDot + kGap, y, right);
+// Reading chrome v3 (Andrew, 2026-08-31): while reading, the tab boxes and
+// the centered status line disappear. Two small words and two small arrows
+// sit at the key centers, and the book's place lives in the lower-right
+// corner — the page number for a compiled book, the percent for a raw epub
+// (its page numbers are per-section and unstable). With Button labels:
+// Hidden only the corner remains. Landscape reading keeps the standard tab
+// column; softKeys() owns that split.
+void ReaderScene::renderReadingChrome(Gfx& gfx) {
+  // Percent for every book (Andrew, 2026-08-31): one honest scalar in the
+  // corner, whatever the engine. Real page numbers still live in the MENU.
+  char corner[16];
+  corner[0] = 0;
+  if (_fbp || _epub) {
+    int pct = static_cast<int>(bookProgress() * 100.0f + 0.5f);
+    if (pct < 0) pct = 0;
+    if (pct > 100) pct = 100;
+    snprintf(corner, sizeof(corner), "%d%%", pct);
+  }
+
+  const int capH = gfx.capHeight(kFontSmall);
+  const int capOff = gfx.capTopOffset(kFontSmall);
+  const int bandMid = gfx.height() - 12;
+  const int textY = bandMid - capH / 2 - capOff;
+  if (corner[0]) {
+    const int cw = gfx.textWidth(kFontSmall, corner);
+    gfx.drawText(kFontSmall, gfx.width() - 16 - cw, textY, corner);
+  }
+  if (!_readKeyBar) return;  // Button labels: Hidden — only the corner stays
+  gfx.drawTextCentered(kFontSmall, Scene::softKeySlotCenterX(gfx, 0), textY, "BOOKS");
+  gfx.drawTextCentered(kFontSmall, Scene::softKeySlotCenterX(gfx, 1), textY, "MENU");
+  drawMiniArrow(gfx, Scene::softKeySlotCenterX(gfx, 2), bandMid, /*right=*/false);
+  drawMiniArrow(gfx, Scene::softKeySlotCenterX(gfx, 3), bandMid, /*right=*/true);
 }
 
 void ReaderScene::renderBookList(Gfx& gfx) {
   if (_lifeOpen) {
-    renderStatsLife(gfx);
+    if (_statsResetArm) renderStatsResetConfirm(gfx);
+    else renderStatsLife(gfx);
     return;
   }
   const int w = gfx.width();
@@ -3353,23 +3481,38 @@ void ReaderScene::renderTile(Gfx& gfx, const int visibleIndex) {
   bool drewThumb = false;
   if (b.meta == TileMeta::Cover) {
     // Center the aspect-fit thumb (dims cached at grid-work time) in the box.
-    drewThumb = reader::CoverThumb::draw(gfx, b.thumbPath, cx - b.thumbW / 2, thumbTop + (kThumbH - b.thumbH) / 2);
+    // FBP sidecar paths are derived here, not stored — see the fast-pass.
+    char covBuf[sizeof(b.path) + 8];
+    const char* thumb = b.thumbPath;
+    if (endsWithFbpCI(b.path)) {
+      snprintf(covBuf, sizeof(covBuf), "%s.cov", b.path);
+      thumb = covBuf;
+    }
+    drewThumb = reader::CoverThumb::draw(gfx, thumb, cx - b.thumbW / 2, thumbTop + (kThumbH - b.thumbH) / 2);
   }
   if (!drewThumb) {
     // Placeholder frame where the cover would sit; text-only "covers" carry
     // the wrapped title inside it.
     const int fx = cx - kThumbW / 2;
     gfx.drawRoundedRect(fx, thumbTop, kThumbW, kThumbH, 8, 2, true);
-    // FBP without a cover: the shaped title strip goes INSIDE the box —
-    // never the raw title (the UI font would stamp "?????" for Arabic/CJK).
+    // FBP without a cover: for a title the UI font cannot render
+    // (Arabic/CJK), the phone-shaped strip goes INSIDE the box — the UI
+    // font would stamp "?????". A title the UI font CAN render draws as
+    // wrapped text below instead: it wraps and truncates properly, where
+    // a strip is a fixed bitmap (and pre-2026-08-31 strips are baked
+    // 220 px wide with clipped titles — "The Adventures of H").
     bool drewStrip = false;
-    if (endsWithFbpCI(b.path)) {
-      char strip[112];
+    if (endsWithFbpCI(b.path) &&
+        !(b.title[0] && gfx.canRender(kFontRegular, b.title))) {
+      char strip[sizeof(b.path) + 8];
       snprintf(strip, sizeof(strip), "%s.str", b.path);
       uint16_t sw, sh;
       if (readThumbDims(strip, &sw, &sh))
+        // Clip to the box interior: strips compiled before 2026-08-31 are
+        // 220 px wide against this 200 px box and broke out of its border.
         drewStrip = reader::CoverThumb::draw(gfx, strip, cx - sw / 2,
-                                             thumbTop + (kThumbH - sh) / 2);
+                                             thumbTop + (kThumbH - sh) / 2, nullptr, nullptr,
+                                             fx + 3, fx + kThumbW - 3);
     }
     if (!drewStrip && b.meta == TileMeta::NoCover && b.title[0] != '\0') {
       const int maxLines = (kThumbH - 40) / gfx.lineHeight(kFontRegular);
@@ -3408,7 +3551,7 @@ void ReaderScene::renderTile(Gfx& gfx, const int visibleIndex) {
   const int tileTextW = r.w - 2 * kTileTextPad;
   const char* wantTitle = b.title[0] ? b.title : baseName(b.path);
   if (endsWithFbpCI(b.path) && !gfx.canRender(kFontRegular, wantTitle)) {
-    char strip[112];
+    char strip[sizeof(b.path) + 8];
     snprintf(strip, sizeof(strip), "%s.str", b.path);
     uint16_t sw, sh;
     if (readThumbDims(strip, &sw, &sh) &&

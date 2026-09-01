@@ -27,6 +27,11 @@ constexpr int kTabRadius = 10;  // top-corner radius
 // front buttons instead of stretching edge to edge.
 constexpr int kBarMarginPct = 8;
 constexpr int kTabGap = 10;
+// Rocker pairing (Andrew, 2026-08-31): slots 0+1 sit on one physical rocker
+// bar and 2+3 on the other, so the bar should read as two pairs, not four
+// islands. Each tab is 10% narrower than its slot and snugs toward its
+// rocker's centerpoint, with this gap between the two halves of one rocker.
+constexpr int kTabGapIntra = 6;
 // Landscape stacks four tabs down a 480/528 px edge instead of across it, so
 // the same 10 px gap costs height the stacked letters need. 6 px keeps the
 // tabs visually separate and buys the 5-letter labels (BOOKS) their pitch.
@@ -96,9 +101,16 @@ struct TabGeom {
 TabGeom softKeyTabGeom(Gfx& gfx, int slot, bool isIcon) {
   const int w = gfx.width();
   const int marginX = (w * kBarMarginPct) / 100;
-  const int tabW = (w - 2 * marginX - 3 * kTabGap) / 4;
+  const int slotW = (w - 2 * marginX - 3 * kTabGap) / 4;
+  // Rocker centerpoints, derived from the legacy four-slot grid so the
+  // pairs stay over the physical keys: cA between slots 0 and 1, cB
+  // between 2 and 3. Tabs are 10% narrower and lean into their center.
+  const int tabW = (slotW * 9) / 10;
+  const int cA = marginX + slotW + kTabGap / 2;
+  const int cB = marginX + 3 * slotW + (5 * kTabGap) / 2;
+  const int c = slot < 2 ? cA : cB;
   const int tabY = gfx.height() - kTabH;
-  int x = marginX + slot * (tabW + kTabGap);
+  int x = (slot % 2 == 0) ? c - kTabGapIntra / 2 - tabW : c + kTabGapIntra / 2;
   int tw = tabW;
   if (isIcon) {
     tw = tabW / 2;
@@ -148,9 +160,16 @@ void drawSoftKeyTabVertical(Gfx& gfx, int slot, const char* label, bool longPres
   const int h = gfx.height();
   const int colW = Scene::SOFTKEY_BAR_H - 6;
   const int marginY = (h * kBarMarginPct) / 100;
-  const int slotH = (h - 2 * marginY - 3 * kTabGapV) / 4;
+  const int fullSlotH = (h - 2 * marginY - 3 * kTabGapV) / 4;
   const int x = w - colW;
-  const int y = h - marginY - (slot + 1) * slotH - slot * kTabGapV;
+  // Rocker pairing, vertical: slot 0 is the BOTTOM key, so slots 0+1 are
+  // the lower rocker and 2+3 the upper one. Same rule as portrait — 10%
+  // shorter than the slot, leaning into the rocker's centerpoint.
+  const int slotH = (fullSlotH * 9) / 10;
+  const int cA = h - marginY - fullSlotH - kTabGapV / 2;
+  const int cB = h - marginY - 3 * fullSlotH - (5 * kTabGapV) / 2;
+  const int c = slot < 2 ? cA : cB;
+  const int y = (slot % 2 == 0) ? c + kTabGapIntra / 2 : c - kTabGapIntra / 2 - slotH;
 
   gfx.fillRect(x, y, colW, slotH, false);
   // Extend past the right edge so drawPixel clips it: only the LEFT corners
@@ -211,6 +230,11 @@ void drawSoftKeyBar(Gfx& gfx, const char* const* labels, const uint8_t longPress
   }
 }
 }  // namespace
+
+int Scene::softKeySlotCenterX(Gfx& gfx, int slot) {
+  const TabGeom g = softKeyTabGeom(gfx, slot, /*isIcon=*/false);
+  return g.x + g.w / 2;
+}
 
 void SceneManager::loop(Input& in, Gfx& gfx) {
   if (!_active) return;

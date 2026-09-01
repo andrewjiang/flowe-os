@@ -75,6 +75,11 @@ class ReadingStats {
   // Whole store as JSON for the transfer server's /stats endpoint.
   static std::string toJson();
 
+  // Erase everything recorded — the day ring, the book table, and any open
+  // session's accumulated pages/time (flowe-os#44). An open session keeps
+  // running from zero, so reading after the reset counts normally.
+  static bool resetAll();
+
  private:
   static void load();
   static bool save();
