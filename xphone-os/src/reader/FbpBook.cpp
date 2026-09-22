@@ -978,6 +978,31 @@ bool FbpBook::readMeta(const char* path, char* title, size_t title_cap, char* au
   return true;
 }
 
+// The smallest contiguous block any profile in this package needs to open:
+// min over profiles of (dict_size + max_raw_page + 1), plus the compact
+// codec's predictor table (predictor_count * sizeof(FcPredictor), the count
+// read from the PRED block at dict_off + dict_size). Reuses profileCapacity
+// so the number is exactly what ensureCapacity will later try to malloc — if
+// even the lightest profile cannot fit the heap's largest block, the reader
+// knows the book cannot open at all and can hand the heap back to it (the
+// radio yields) before workOpenFbp() reserves anything.
+//
+// 0 = cannot decide (pre-v4 format, unreadable header, or no valid profile).
+// Callers treat 0 as "no decision": today's behaviour stays untouched.
+uint32_t FbpBook::minPageBufferBytes(const char* path) {
+  FbpBook b;
+  if (!b.open(path) || b._hdr.fmt_ver < 4) return 0;
+  uint32_t min = 0;
+  for (uint32_t i = 0; i < b._hdr.profile_count; i++) {
+    ProfileDir d;
+    uint32_t page = 0, predictors = 0;
+    if (!b.readProfile(i, &d) || !b.profileCapacity(d, &page, &predictors)) continue;
+    const uint32_t need = page + predictors * static_cast<uint32_t>(sizeof(FcPredictor));
+    if (min == 0 || need < min) min = need;
+  }
+  return min;
+}
+
 // Write one XT-format bin (CoverThumb.h) from 1-bpp packed bits.
 static bool writeXtBin(const char* path, uint16_t w, uint16_t h, FsFile& src, uint32_t size) {
   FsFile out = SdMan.open(path, O_WRONLY | O_CREAT | O_TRUNC);

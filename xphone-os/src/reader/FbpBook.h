@@ -119,6 +119,16 @@ class FbpBook {
   static bool readMeta(const char* path, char* title, size_t title_cap, char* author,
                        size_t author_cap, bool* focus_edition = nullptr);
 
+  // The smallest contiguous block the package needs to open AT ALL: the min,
+  // over its profiles, of (dict_size + max_raw_page + 1) plus
+  // predictor_count * sizeof(FcPredictor) for compact-codec profiles. The
+  // reader compares this against the largest free block after the radio stack
+  // is up; when it cannot fit, the radio must yield or the book's one-shot
+  // page-buffer reservation fails (X3: 12,079 B needed vs 7,156 B largest).
+  // 0 when it cannot be decided (pre-v4 format, unreadable header) — 0 means
+  // "no decision", so the caller keeps today's behaviour.
+  static uint32_t minPageBufferBytes(const char* path);
+
   // Ensure the phone-prepared shelf sidecars exist next to the package
   // ("<path>.cov" / "<path>.str", CoverThumb XT bin format). Cheap when
   // already extracted. Outputs say which assets exist.

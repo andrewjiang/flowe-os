@@ -674,6 +674,13 @@ void ReaderScene::workOpenBook() {
       // book state hard-hung an X4, see the M4.2 note in main.cpp).
       // resumeAfterReader() no-ops when the radio is already up; this also
       // revives the boot-deferred radios when a restore lands in a book.
+      //
+      // The package's page buffer is one contiguous reservation taken at the
+      // first profile select, before any of this runs, so work out how much
+      // the lightest profile needs NOW — the decision below must be made
+      // against the post-BLE heap, not after the book has already lost its
+      // only chance to reserve. 0 = cannot decide: behaviour unchanged.
+      const uint32_t need = reader::FbpBook::minPageBufferBytes(_bookPath.c_str());
       _radioSuspended = false;
       COMPANION_BLE.resumeAfterReader();
       // P1.1: free the connected-era strings BEFORE the book claims its
@@ -681,6 +688,19 @@ void ReaderScene::workOpenBook() {
       // The EPUB path has always done this via suspendForReader(); the FBP
       // path never did (efficiency audit 2026-09-02).
       COMPANION_BLE.releaseReaderTransients(/*radioUp=*/true);
+      // BLE+ANCS costs ~76-77 KB and can leave the largest free block under
+      // the package's minimum claim: on an X3 the stack left 7,156 B largest
+      // while a 528x792 fmt_ver 9 compact package needs 12,079 B (dict 8,192
+      // + max_raw 3,086 + 1 + 100 predictors x 8) in its lightest profile,
+      // so the book failed all three profiles by ~5 KB. When that happens,
+      // hand the heap back to the book exactly as the Never policy does —
+      // the radio returns on book close (onExit resumes it).
+      const size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+      if (need && largest < need) {
+        Serial.printf("[xphone-os] reader: '%s' needs %lu B for its page buffer (largest %u B): radio waits until close\n",
+                      baseName(_bookPath.c_str()), static_cast<unsigned long>(need), static_cast<unsigned>(largest));
+        suspendRadioForBookWork();
+      }
     } else {
       // Policy says quiet: same suspend the EPUB path uses. The radio
       // returns on book close exactly as it does for EPUBs today.
