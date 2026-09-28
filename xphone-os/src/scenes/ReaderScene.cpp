@@ -281,7 +281,7 @@ bool readThumbDims(const char* binPath, uint16_t* w, uint16_t* h) {
   if (hdr[0] != 0x54 || hdr[1] != 0x58 || hdr[2] != 1) return false;  // 'XT' LE + v1
   const uint16_t tw = static_cast<uint16_t>(hdr[4] | (hdr[5] << 8));
   const uint16_t th = static_cast<uint16_t>(hdr[6] | (hdr[7] << 8));
-  if (tw == 0 || th == 0) return false;
+  if (tw == 0 || th == 0 || f.size() < 8 + ((static_cast<uint32_t>(tw) + 7) / 8) * th) return false;
   *w = tw;
   *h = th;
   return true;
@@ -2922,10 +2922,13 @@ bool ReaderScene::loadShelfIndex() {
       snprintf(e.title, sizeof(e.title), "%s", row.title);
       snprintf(e.author, sizeof(e.author), "%s", row.author);
       e.focusEdition = row.focus != 0;
-      e.meta = row.hasCover ? TileMeta::Cover : TileMeta::NoCover;
+      e.meta = TileMeta::NoCover;
       if (row.hasCover) {
-        e.thumbW = row.thumbW;
-        e.thumbH = row.thumbH;
+        // The index remembers metadata, not the continued health of a
+        // sidecar. A missing or short cover must reach the repair pass.
+        char cov[sizeof(e.path) + 8];
+        snprintf(cov, sizeof(cov), "%s.cov", e.path);
+        if (readThumbDims(cov, &e.thumbW, &e.thumbH)) e.meta = TileMeta::Cover;
       }
       if (e.title[0] == 0) prettyFileTitle(e.path, e.title, sizeof(e.title));
       filled++;
@@ -3127,7 +3130,7 @@ void ReaderScene::scanBooks(const int windowOffset) {
   // Fill from the shelf index first, so the fast-pass below only opens the
   // books the index does not already know.
   loadShelfIndex();
-  int openedPackages = 0;
+  int changedPackages = 0;
 
   // Fast-pass: tiles whose caches already exist paint complete on the FIRST
   // render. Reopening the Reader used to visibly re-upgrade every tile
@@ -3137,22 +3140,32 @@ void ReaderScene::scanBooks(const int windowOffset) {
   for (int i = 0; i < _bookCount; i++) {
     BookEntry& b = _books[i];
     if (endsWithFbpCI(b.path)) {
-      if (b.meta != TileMeta::Unknown) continue;  // the index already knew it
+      if (b.meta == TileMeta::Cover) continue;
+      const TileMeta previousMeta = b.meta;
       // Compiled package: meta comes from the FBPK header, and the shelf
       // assets (cover thumb + shaped title strip) were pre-rendered by the
       // phone — extract them once into CoverThumb-format sidecars.
       bool focusEd = false;
       xpTrace(b.path);
-      if (reader::FbpBook::readMeta(b.path, b.title, sizeof(b.title), b.author, sizeof(b.author),
+      if (b.meta == TileMeta::Unknown &&
+          reader::FbpBook::readMeta(b.path, b.title, sizeof(b.title), b.author, sizeof(b.author),
                                     &focusEd)) {
         b.focusEdition = focusEd;
         b.meta = TileMeta::NoCover;
+      }
+      if (b.meta == TileMeta::NoCover) {
+        // A cached negative may mean an earlier SD write failed. Retry the
+        // sidecars while retaining the index's title, author and focus flag.
         // A package with an empty title in its header would otherwise wipe
         // the seeded name and leave the tile blank.
         if (b.title[0] == '\0') prettyFileTitle(b.path, b.title, sizeof(b.title));
-        bool hasCover = false, hasStrip = false;
+        bool hasCover = false, hasStrip = false, pkgDeclaresCover = false;
         xpTrace("reader: extract cover art");
-        reader::FbpBook::ensureShelfSidecars(b.path, &hasCover, &hasStrip);
+        reader::FbpBook::ensureShelfSidecars(b.path, &hasCover, &hasStrip, &pkgDeclaresCover);
+        if (pkgDeclaresCover && !hasCover) {
+          Serial.printf("[xphone-os] reader: '%s' declares a shelf cover but extraction failed\n", b.path);
+          xpTrace("reader: sidecar extraction failed");
+        }
         if (hasCover) {
           // Only the DIMS are cached; renderTile derives the sidecar path
           // from b.path at draw time. Storing it needed path + ".cov" to
@@ -3164,10 +3177,9 @@ void ReaderScene::scanBooks(const int windowOffset) {
           if (readThumbDims(cov, &b.thumbW, &b.thumbH)) b.meta = TileMeta::Cover;
         }
       }
-      // Count the open only when it taught us something. A damaged book never
-      // resolves, and counting it made every visit rewrite the whole index for
-      // no gain.
-      if (b.meta != TileMeta::Unknown) openedPackages++;
+      // Retry does not mean change. Neither a genuine coverless package nor
+      // a failed repair should rewrite the same negative row on every visit.
+      if (b.meta != previousMeta) changedPackages++;
       continue;
     }
     // R5: EPUB work (even a cache hit) allocates strings and vectors that
@@ -3206,9 +3218,8 @@ void ReaderScene::scanBooks(const int windowOffset) {
       b.meta = TileMeta::NoCover;
     }
   }
-  // Write the index back only when this scan actually opened a package, so a
-  // shelf that was fully known costs one read and no write at all.
-  if (openedPackages > 0) saveShelfIndex();
+  // Persist newly read metadata and repaired covers, not unchanged retries.
+  if (changedPackages > 0) saveShelfIndex();
 }
 
 void ReaderScene::scanDir(const char* dir, const int depth) {

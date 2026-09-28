@@ -25,6 +25,7 @@
 #include <EInkDisplay.h>
 
 #include <cstdint>
+#include <string>
 
 #include "fonts/EpdFontData.h"
 
@@ -84,10 +85,10 @@ class Gfx {
   void setOrientation(Orient o);
   Orient orientation() const { return _orient; }
 
-  // True when every character of `text` has a glyph in `f`. The UI fonts
-  // are ASCII+Latin subsets, so an Arabic/CJK/Cyrillic string would draw
-  // as a row of "?" — callers with a bitmap alternative (the FBP shaped
-  // title strip) use this to choose.
+  // True when every character has a glyph after supported accent composition.
+  // UI fonts include ASCII, Latin-1, Latin Extended-A, and Greek/Cyrillic
+  // subsets. Missing glyphs (e.g. Arabic, CJK, or general punctuation) draw
+  // as '?'; callers with an FBP title bitmap use this to choose.
   bool canRender(const XpFont& f, const char* text) const;
 
   // Integer-scaled text. The builtin fonts ship at three sizes only
@@ -182,6 +183,10 @@ class Gfx {
   const EpdGlyph* findGlyph(const XpFont& f, uint32_t cp) const;
   void blitGlyph(const XpFont& f, const EpdGlyph* g, int penX, int lineTopY, bool black);
   static uint32_t nextCodepoint(const char** s);
+  // Compose supported accent pairs without changing the caller's text.
+  // Returns src directly when no candidate combining mark is present;
+  // otherwise scratch owns the complete composed text (no fixed-size cap).
+  const char* composeForUi(const char* src, std::string& scratch) const;
 
   EInkDisplay& _d;
   uint8_t* _fb = nullptr;

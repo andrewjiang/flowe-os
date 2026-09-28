@@ -40,5 +40,6 @@ struct TestSD {
  bool ready(){return true;} bool begin(){return true;}
  FsFile open(const char* path,int flags){return FsFile(fopen(path,flags&O_WRONLY?"wb":"rb"));}
  bool exists(const char* path){return access(path,F_OK)==0;}
+ bool remove(const char* path){return std::remove(path)==0;}
 };
 inline TestSD SdMan;

@@ -121,8 +121,11 @@ class FbpBook {
 
   // Ensure the phone-prepared shelf sidecars exist next to the package
   // ("<path>.cov" / "<path>.str", CoverThumb XT bin format). Cheap when
-  // already extracted. Outputs say which assets exist.
-  static bool ensureShelfSidecars(const char* path, bool* has_cover, bool* has_strip);
+  // already extracted. Outputs say which complete assets exist. The optional
+  // pkg_declares_cover reports ts > 0 from the package's shelf header, even
+  // if extraction fails. A strip alone does not declare a cover.
+  static bool ensureShelfSidecars(const char* path, bool* has_cover, bool* has_strip,
+                                 bool* pkg_declares_cover = nullptr);
 
   // What the LAST renderPage cost: every buffer alive at once (page record,
   // glyph hash, uniq table, sort index, glyph arena) and the unique-glyph

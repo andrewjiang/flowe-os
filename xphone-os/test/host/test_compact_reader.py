@@ -14,8 +14,8 @@ def run(old,new,profiles,out,device='x4'):
     if device == 'x3': flags += ['-DFLOWE_TEST_DISPLAY_X3=1']
     subprocess.run(['clang',*flags,'-c',str(OS/'lib/uzlib/src/tinflate.c'),'-I'+str(OS/'lib/uzlib/src'),'-o',str(out/'tinflate.o')],check=True)
     subprocess.run(['c++','-std=c++17',*flags,'-DFLOWE_BENCH_COMPACT=1',
-        *['-I'+str(OS/p) for p in ('test/host/compact_stubs','test/host/sync_stubs','lib/uzlib/src','lib/EpdFontCore')],
-        str(OS/'src/reader/FbpBook.cpp'),str(OS/'src/Gfx.cpp'),str(OS/'test/host/compact_reader_test.cpp'),str(out/'tinflate.o'),'-o',str(out/'firmware-reader-test')],check=True)
+        *['-I'+str(OS/p) for p in ('test/host/compact_stubs','test/host/sync_stubs','lib/uzlib/src','lib/EpdFontCore','lib/Utf8','lib/FbpCompact')],
+        str(OS/'src/reader/FbpBook.cpp'),str(OS/'src/Gfx.cpp'),str(OS/'lib/Utf8/Utf8.cpp'),str(OS/'test/host/compact_reader_test.cpp'),str(out/'tinflate.o'),'-o',str(out/'firmware-reader-test')],check=True)
     subprocess.run([str(out/'firmware-reader-test'),str(old),str(new),str(profiles)],check=True)
 if __name__=='__main__':
     if len(sys.argv) not in (5,6) or (len(sys.argv)==6 and sys.argv[5] not in ('x3','x4')):raise SystemExit(__doc__)

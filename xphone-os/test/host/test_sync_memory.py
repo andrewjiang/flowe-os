@@ -27,11 +27,14 @@ def load(name):
 
 class SyncMemoryTest(unittest.TestCase):
     def compile_run(self, sources, flags=()):
+        if OS / "src/Gfx.cpp" in sources:
+            sources = [*sources, OS / "lib/Utf8/Utf8.cpp"]
         with tempfile.TemporaryDirectory() as tmp:
             exe = Path(tmp) / "test"
             subprocess.run(["c++", "-std=c++17", "-fsanitize=address,undefined", "-g",
                             "-I" + str(STUBS), "-I" + str(SDK / "include"),
-                            "-I" + str(OS / "lib/EpdFontCore"), *flags,
+                            "-I" + str(OS / "lib/EpdFontCore"),
+                            "-I" + str(OS / "lib/Utf8"), *flags,
                             *map(str, sources), "-o", str(exe)], check=True)
             subprocess.run([str(exe)], check=True)
 

@@ -1,9 +1,11 @@
 // The one and only TU that includes the font data headers.
 //
-// M2.1c flash diet: the headers are ASCII (U+0020..U+007E) subsets generated
-// by tools/subset_epd_font.py from the read-only x4-os builtin fonts (see the
-// regeneration command in each header). Non-ASCII codepoints have no glyph
-// and render as '?' via the Gfx findGlyph fallback. Only the
+// The headers are generated subsets (tools/gen_epd_font.py) of the Ubuntu
+// builtin fonts: ASCII U+0020..U+007E, Latin-1 + Latin Extended-A
+// U+00A0..U+017F, plus Greek and Cyrillic subsets.
+// Codepoints outside the generated intervals — notably General Punctuation
+// U+2000..U+206F (dashes, ellipsis, curly quotes) —
+// have no glyph and render as '?' via the Gfx findGlyph fallback. Only the
 // Bitmaps/Glyphs/Intervals arrays are emitted; the originals' kern/ligature
 // tables were unreferenced (gc-sections discarded them) and are gone.
 //

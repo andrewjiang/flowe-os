@@ -978,8 +978,20 @@ bool FbpBook::readMeta(const char* path, char* title, size_t title_cap, char* au
   return true;
 }
 
+// An interrupted write can leave a valid header with missing pixels. Such
+// a file is not a cache hit: let the next shelf scan extract it again.
+static bool validXtBin(const char* path) {
+  FsFile f = SdMan.open(path, O_RDONLY);
+  uint8_t hdr[8];
+  if (!f || f.read(hdr, sizeof(hdr)) != sizeof(hdr)) return false;
+  if (hdr[0] != 0x54 || hdr[1] != 0x58 || hdr[2] != 1) return false;
+  const uint16_t w = hdr[4] | (hdr[5] << 8), h = hdr[6] | (hdr[7] << 8);
+  return w && h && f.size() >= 8 + ((static_cast<uint32_t>(w) + 7) / 8) * h;
+}
+
 // Write one XT-format bin (CoverThumb.h) from 1-bpp packed bits.
 static bool writeXtBin(const char* path, uint16_t w, uint16_t h, FsFile& src, uint32_t size) {
+  if (!w || !h || size != ((static_cast<uint32_t>(w) + 7) / 8) * h) return false;
   FsFile out = SdMan.open(path, O_WRONLY | O_CREAT | O_TRUNC);
   if (!out) return false;
   uint8_t hdr[8] = {0x54, 0x58, 1, 0, (uint8_t)(w & 0xFF), (uint8_t)(w >> 8), (uint8_t)(h & 0xFF),
@@ -993,18 +1005,21 @@ static bool writeXtBin(const char* path, uint16_t w, uint16_t h, FsFile& src, ui
     left -= take;
   }
   out.close();
+  if (!ok) SdMan.remove(path);
   return ok;
 }
 
-bool FbpBook::ensureShelfSidecars(const char* path, bool* has_cover, bool* has_strip) {
+bool FbpBook::ensureShelfSidecars(const char* path, bool* has_cover, bool* has_strip,
+                                bool* pkg_declares_cover) {
   char cov[192], str[192];
   snprintf(cov, sizeof(cov), "%s.cov", path);
   snprintf(str, sizeof(str), "%s.str", path);
-  *has_cover = SdMan.exists(cov);
-  *has_strip = SdMan.exists(str);
+  *has_cover = validXtBin(cov);
+  *has_strip = validXtBin(str);
+  if (pkg_declares_cover) *pkg_declares_cover = false;
   // BOTH, not either: a book that ever got one sidecar but not the other
   // (interrupted transfer, full card) used to be stuck that way forever.
-  if (*has_cover && *has_strip) return true;  // extracted on a previous scan
+  if (*has_cover && *has_strip && !pkg_declares_cover) return true;  // extracted on a previous scan
 
   FbpBook b;
   if (!b.open(path) || !b._hdr.shelf_off) return false;
@@ -1018,13 +1033,15 @@ bool FbpBook::ensureShelfSidecars(const char* path, bool* has_cover, bool* has_s
   memcpy(&sw, shdr + 8, 2);
   memcpy(&sh, shdr + 10, 2);
   memcpy(&ss, shdr + 12, 4);
-  uint64_t bits = b._hdr.shelf_off + 16;
-  if (ts && !*has_cover) {
-    b._f.seekSet(bits);
+  if (pkg_declares_cover) *pkg_declares_cover = ts > 0;
+  const uint64_t bits = b._hdr.shelf_off + 16;
+  const uint64_t fileSize = b._f.size();
+  if (ts && !*has_cover && bits <= fileSize && ts <= fileSize - bits && b._f.seekSet(bits)) {
     *has_cover = writeXtBin(cov, tw, th, b._f, ts);
   }
-  if (ss && !*has_strip) {
-    b._f.seekSet(bits + ts);
+  const uint64_t stripBits = bits + ts;
+  if (ss && !*has_strip && stripBits <= fileSize && ss <= fileSize - stripBits &&
+      b._f.seekSet(stripBits)) {
     *has_strip = writeXtBin(str, sw, sh, b._f, ss);
   }
   return *has_cover || *has_strip;
