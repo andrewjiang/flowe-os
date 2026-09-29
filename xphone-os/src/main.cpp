@@ -47,6 +47,7 @@
 #include "WorkoutStore.h"
 #include "SdUpdate.h"
 #include "StallWatch.h"
+#include "BackgroundImage.h"
 #include "Sleep.h"
 #include "ble/CompanionAncsClient.h"
 #include "ble/CompanionBleService.h"
@@ -2621,8 +2622,35 @@ void loop() {
     } else {
       // Only the power button wakes a nap (Andrew, 2026-09-05): one rule for
       // both rest states, no bag wakes from the face buttons, and no
-      // swallowed press. Face buttons do nothing here.
+      // swallowed press. Face buttons do nothing here — EXCEPT this pair,
+      // which stays fully asleep (no gNapping/sceneLoop change, no wake):
+      // Right shows the user's /background.bmp full-screen in place of the
+      // normal sleep face; Left reverts. The choice persists (Sleep::
+      // setNapBackgroundOverride), so it's also what the NEXT sleep (nap or
+      // OFF) starts on. waitFlushIdle first: the SD card and the panel share
+      // the SPI bus, and the redraw reads the card (refreshNapPoster waits
+      // for the same reason).
       sceneLoop = false;  // sleep screen on the glass: no input, no repaints; the radio and the naps go on
+      // Tap OR long press: a tap only counts if the button is RELEASED under
+      // 550 ms (Input::kLongPressMs), and someone poking a button that looks
+      // dead holds it longer than that — which would report only the
+      // long-press edge and do nothing at all.
+      const bool rightPress = input.wasPressed(Btn::Right) || input.wasLongPressed(Btn::Right);
+      const bool leftPress = input.wasPressed(Btn::Left) || input.wasLongPressed(Btn::Left);
+      if (rightPress) {
+        SCENES.waitFlushIdle();
+        if (Sleep::setNapBackgroundOverride(true)) {
+          // First show of a given image reads and dithers it whole off the
+          // card — seconds of a frozen-looking glass without a frame saying
+          // so. A cache hit is just a blit, so skip the extra refresh there.
+          if (!BackgroundImage::cached(gfx.width(), gfx.height())) Sleep::drawNapBackgroundLoading(gfx);
+          Sleep::drawSleepScreenNow(gfx, /*napping=*/true);
+        }
+      } else if (leftPress && Sleep::napShowingBackground()) {
+        SCENES.waitFlushIdle();
+        Sleep::setNapBackgroundOverride(false);
+        Sleep::drawSleepScreenNow(gfx, /*napping=*/true);
+      }
       pumpNapPoster();    // a fresh phone snapshot redraws the poster with one quiet FAST
       if (gNapCleanAtMs && static_cast<long>(millis() - gNapCleanAtMs) >= 0) {
         // The X4's quiet clean: the framebuffer still holds the poster (or a

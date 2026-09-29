@@ -16,8 +16,10 @@
 #include "driver/gpio.h"
 #include "esp_sleep.h"
 
+#include "BackgroundImage.h"
 #include "BlockStatusStore.h"
 #include "Fonts.h"
+#include "ImageThumb.h"
 #include "StatusBar.h"
 #include "scenes/HomeScene.h"
 #include "NotificationStore.h"
@@ -33,6 +35,7 @@
 #include "scenes/WorkoutScene.h"
 #include "WorkoutStore.h"
 #include <ArduinoJson.h>
+#include <string>
 
 namespace {
 
@@ -108,6 +111,24 @@ uint32_t gLastPosterFingerprint = 0;  // the poster on the glass, 0 = none
 
 void composeSleepScreen(Gfx& gfx, const bool napping) {
   gfx.clear();
+
+  // Nap-screen background override (bottom-right/bottom-left buttons):
+  // checked first, ahead of every Face/scene branch below, so it replaces
+  // whatever would otherwise be on glass. Full-bleed, no footer/wake-hint
+  // chrome overlay — the point is a clean wallpaper, not another poster.
+  if (Sleep::napShowingBackground()) {
+    std::string bgPath;
+    int bgW = 0, bgH = 0;
+    if (BackgroundImage::ensure(gfx.width(), gfx.height(), &bgPath, &bgW, &bgH)) {
+      const int bx = (gfx.width() - bgW) / 2;
+      const int by = (gfx.height() - bgH) / 2;
+      imagethumb::blit(gfx, bgPath.c_str(), bx, by);
+      return;
+    }
+    // No /background.bmp (removed since the override was set) or the decode
+    // failed: fall through to the normal Face below instead of a blank glass.
+    // ensure() logs the reason over serial.
+  }
 
   // Sleeping FROM the Workout scene: the workout list replaces the priorities
   // list; the footer stack (calendar + block + wake hint) stays identical so
@@ -244,6 +265,7 @@ constexpr uint16_t kNapChoices[] = {2, 5, 10, 15, 30, 0};
 constexpr uint16_t kOffChoices[] = {15, 30, 60, 120, 240, 0};
 uint16_t sNapMin = 0xFFFF, sOffMin = 0xFFFF;  // 0xFFFF = not loaded yet
 uint8_t sFace = 0;
+uint8_t sBg = 0;  // nap-screen background override, persisted like sFace
 
 void loadPolicy() {
   if (sNapMin != 0xFFFF) return;
@@ -253,6 +275,7 @@ void loadPolicy() {
     nap = p.getUShort("napMin", nap);
     off = p.getUShort("offMin", off);
     sFace = p.getUChar("face", 0);
+    sBg = p.getUChar("bg", 0);
     p.end();
   }
   sNapMin = nap;
@@ -264,6 +287,7 @@ void storePolicy() {
   p.putUShort("napMin", sNapMin);
   p.putUShort("offMin", sOffMin);
   p.putUChar("face", sFace);
+  p.putUChar("bg", sBg);
   p.end();
 }
 uint16_t cycleIn(const uint16_t* choices, const size_t n, const uint16_t cur, const int delta) {
@@ -305,6 +329,19 @@ Face cycleFace(const int delta) {
   return face();
 }
 const char* faceName(const Face f) { return f == Face::LastScreen ? "Last screen" : "Priorities"; }
+
+bool napShowingBackground() { loadPolicy(); return sBg != 0; }
+bool setNapBackgroundOverride(const bool on) {
+  loadPolicy();
+  if (on && !BackgroundImage::available()) {
+    Serial.println("[xphone-os] nap background: no /background.bmp on the card; ignoring");
+    return false;
+  }
+  sBg = on ? 1 : 0;
+  storePolicy();
+  Serial.printf("[xphone-os] settings: nap background %s\n", on ? "on" : "off");
+  return true;
+}
 void formatMinutes(char* out, const size_t n, const uint16_t min) {
   if (min == 0) snprintf(out, n, "Never");
   else if (min < 60) snprintf(out, n, "%u min", static_cast<unsigned>(min));
@@ -315,6 +352,19 @@ void formatMinutes(char* out, const size_t n, const uint16_t min) {
 void drawSleepScreenNow(Gfx& gfx, const bool napping) {
   CpuBoost boost;  // the chip idles at 40 MHz; composing the poster there took 4x longer
   drawSleepScreen(gfx, napping);
+}
+
+void drawNapBackgroundLoading(Gfx& gfx) {
+  CpuBoost boost;
+  gfx.clear();
+  const int cx = gfx.width() / 2;
+  const int cy = gfx.height() / 2;
+  gfx.drawTextCentered(kFontBold, cx, cy - gfx.lineHeight(kFontBold), "Preparing background");
+  gfx.drawTextCentered(kFontSmall, cx, cy + 8, "first time only");
+  // Same tier the nap poster uses, so this lands as fast as any other rest
+  // repaint. The real poster overwrites it as soon as the decode finishes.
+  SCENES.flushFramebufferNow(gfx, ::gDeviceIsX3 ? SceneManager::NowTier::Half : SceneManager::NowTier::Fast);
+  gLastPosterFingerprint = 0;  // this frame is not a poster; force the next compare to redraw
 }
 
 bool refreshNapPoster(Gfx& gfx) {

@@ -74,6 +74,24 @@ void setFace(Face f);
 Face cycleFace(int delta);
 const char* faceName(Face f);
 
+// Nap-screen background image (bottom-right/bottom-left buttons): a
+// user-supplied /background.bmp (BackgroundImage.h) shown
+// full-screen instead of the configured Face while napping. NOT a
+// Face value and NOT gated behind Settings — the two buttons toggle it
+// directly. Persisted in NVS ("sleep": bg) like the Face choice, so the LAST
+// selection is what the device's next sleep (nap or OFF) starts on.
+bool napShowingBackground();
+// Full-screen "working on it" frame. The FIRST time a given background is
+// shown it is read off the SD card and dithered whole, which takes seconds;
+// without this the glass just sits on the old poster and the button looks
+// dead. Call before drawSleepScreenNow() when BackgroundImage::cached() is
+// false; the cached path is a straight blit and needs nothing.
+void drawNapBackgroundLoading(Gfx& gfx);
+// Turns the override on/off and persists it. Returns false (state left
+// unchanged) when turning ON with no background image available, so a
+// Right-press with no /background.bmp present is a silent no-op.
+bool setNapBackgroundOverride(bool on);
+
 // Bench A/B for the OFF poster tier: 0 = policy (FULL), 1 = HALF, 2 = FULL.
 extern uint8_t gPosterTierOverride;
 // P1.2 (efficiency test plan 2026-09-02): the X3's QMI8658 motion sensor is
